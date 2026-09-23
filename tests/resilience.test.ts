@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { jevAsker } from '../hooks/fast-jev.js';
 import { JevClient } from '../src/client.js';
 import { mapLimit, MAX_CONCURRENT_REQUESTS } from '../src/compact.js';
 import { describeFailureBody, JevHttpError, parseJevResponse } from '../src/request.js';
@@ -60,6 +61,26 @@ describe('JevClient retry', () => {
     const client = new JevClient({ apiKey: 'k', fetch: fetcher, retryDelayMs: 0 });
     await expect(client.ask({} as never, {})).rejects.toThrow(/422/);
     expect(n).toBe(1);
+  });
+});
+
+describe('hook jevAsker retry', () => {
+  it('retries the engine fetch once after a 403 block page', async () => {
+    let n = 0;
+    const fetchFn = async () => {
+      n++;
+      return n === 1
+        ? { status: 403, ok: false, text: CLOUDFLARE_403 }
+        : { status: 200, ok: true, text: JSON.stringify({ answers: {} }) };
+    };
+    const waits: number[] = [];
+    const asker = jevAsker(fetchFn, 'k', 'jev-latest', async (ms) => {
+      waits.push(ms);
+    });
+    await expect(asker.ask({} as never, {})).resolves.toEqual({ answers: {} });
+    expect(n).toBe(2);
+    expect(waits.length).toBe(1);
+    expect(waits[0]).toBeGreaterThanOrEqual(1125);
   });
 });
 

@@ -9,7 +9,12 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import {
+  buildJevRequest,
+  DEFAULT_MODEL,
+  isRetryableStatus,
+  parseJevResponse,
+} from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -87,17 +92,34 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   return config;
 }
 
-/** A `JevAsker` over the engine's `$.http.fetch`. */
-export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): JevAsker {
+/**
+ * A `JevAsker` over the engine's `$.http.fetch`; one jittered retry after a 403, 429 or 5xx.
+ * The hook runtime has no `setTimeout`, so the wait is the engine's `$.clock.sleep`, passed
+ * in; without one the retry is immediate.
+ */
+export function jevAsker(
+  fetchFn: HookFetch,
+  apiKey: string,
+  model: string,
+  sleep?: (ms: number) => Promise<void>,
+  retries = 1,
+  retryDelayMs = 1500,
+): JevAsker {
   return {
     async ask(state, questions) {
       const request = buildJevRequest({ apiKey, model }, state, questions);
-      const response = await fetchFn(request.url, {
-        method: request.method,
-        headers: request.headers,
-        body: request.body,
-      });
-      return parseJevResponse(response.status, response.ok, response.text);
+      for (let attempt = 0; ; attempt++) {
+        const response = await fetchFn(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+        });
+        if (!response.ok && attempt < retries && isRetryableStatus(response.status)) {
+          if (sleep) await sleep(retryDelayMs * (attempt + 1) * (0.75 + Math.random() * 0.5));
+          continue;
+        }
+        return parseJevResponse(response.status, response.ok, response.text);
+      }
     },
   };
 }
@@ -166,9 +188,11 @@ export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
+  sleep?: (ms: number) => Promise<void>,
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  const asker = jevAsker(fetchFn, config.apiKey, config.model, sleep);
+  const result = await compact(messages, asker, config);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -263,10 +287,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.compact', async ($, event, next) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
-      });
+      const { result, messages } = await compactSession(
+        event.messages,
+        config,
+        async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          return { status: response.status, ok: response.ok, text: response.text };
+        },
+        async (ms) => {
+          await $.clock.sleep(ms);
+        },
+      );
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
