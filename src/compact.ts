@@ -26,6 +26,31 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
 const REQUEST_OVERHEAD_TOKENS = 20;
 
+/**
+ * Batches in flight at once. Every batch re-sends the full state, so a long session
+ * fanned out unbounded is a burst of 100+ large POSTs, which an edge rate rule answers
+ * with a 403 block page and the whole compaction falls back.
+ */
+export const MAX_CONCURRENT_REQUESTS = 4;
+
+/** `Promise.all` over `items` with at most `limit` calls in flight; order is kept. */
+export async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  return out;
+}
+
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -272,8 +297,8 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
+    const answered = await mapLimit(batches, MAX_CONCURRENT_REQUESTS, (batch) =>
+      askBatch(asker, state.state, batch),
     );
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }

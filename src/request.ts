@@ -35,6 +35,36 @@ export function buildJevRequest(
   };
 }
 
+/** A non-2xx Jev response; `status` lets callers decide whether a retry can help. */
+export class JevHttpError extends Error {
+  constructor(
+    readonly status: number,
+    detail: string,
+  ) {
+    super(`Jev request failed (${status}): ${detail}`);
+    this.name = 'JevHttpError';
+  }
+}
+
+/** Statuses worth one retry: an edge block or rate limit (403 HTML, 429) and server errors. */
+export function isRetryableStatus(status: number): boolean {
+  return status === 403 || status === 429 || status >= 500;
+}
+
+/**
+ * The useful part of a failure body. A Cloudflare block page is HTML whose first
+ * 200 chars are IE conditional comments; its title and Ray ID are what identify the rule.
+ */
+export function describeFailureBody(text: string): string {
+  if (!/^\s*<(!DOCTYPE|html|!--)/i.test(text)) return text.slice(0, 200);
+  const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
+  const ray = /Ray ID:\s*(?:<[^>]*>)?\s*([0-9a-f]{8,})/i.exec(text)?.[1];
+  const parts = ['HTML block page'];
+  if (title) parts.push(`title "${title}"`);
+  if (ray) parts.push(`Cloudflare Ray ID ${ray}`);
+  return parts.join(', ');
+}
+
 /** Validates a Jev response body; throws on anything but an `answers` object. */
 export function parseJevResponse(
   status: number,
@@ -42,7 +72,7 @@ export function parseJevResponse(
   text: string,
 ): JevResponse {
   if (!ok) {
-    throw new Error(`Jev request failed (${status}): ${text.slice(0, 200)}`);
+    throw new JevHttpError(status, describeFailureBody(text));
   }
   let parsed: unknown;
   try {
