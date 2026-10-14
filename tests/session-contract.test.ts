@@ -164,7 +164,8 @@ describe('applied versus speculative cuts and safe fallback', () => {
     const next = async e => e;
     const one = h.handlers['turn.complete'](h.$, {}, next);
     const two = h.handlers['turn.complete'](h.$, {}, next);
-    await Promise.resolve(); await Promise.resolve();
+    // Enough ticks for both handlers to pass their usage, id and env reads; the first sets `compacting` before the second checks it.
+    for (let i = 0; i < 12; i++) await Promise.resolve();
     expect(h.$.session.compact).toHaveBeenCalledTimes(1);
     finish();
     await Promise.all([one, two]);
