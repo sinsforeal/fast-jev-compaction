@@ -72,11 +72,11 @@ development setup.
 Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
 `maxPostCompactTokens`, `logDecisions` and `model` is passed to the library; see the root README for what they
 do. The `session.compact` hook runs the Jev requests concurrently. Engine request
-failures and invalid results use the original full event for a logged fallback.
-The [root fidelity rules](../README.md#fidelity-rules) give the exhaustive list,
-including the per-cut exception for demonstrably unreconstructable content.
-Both `minReductionRatio` and `maxPostCompactTokens` are warning thresholds only.
-Local state-budget/preparation failures leave history unchanged via a veto.
+failures, invalid results and local preparation failures log the reason and use
+deterministic transcript recovery. Text and calls stay; eligible older results
+are truncated with the existing evidence notes. The
+[root fidelity rules](../README.md#fidelity-rules) describe the policy.
+`minReductionRatio` is the sole summary gate. `maxPostCompactTokens` only warns.
 The outcome includes estimated visible post-cut size against the target.
 Detailed kept/dropped probabilities, fallback counts and text
 scores are logged only with `logDecisions: true`; arbitrary output and transport
@@ -93,8 +93,8 @@ supply UUID chronology. Canonical queued deliveries replace provisional prompt
 records instead of duplicating them. The bounded API-tail view recovers known
 historical hidden text and selects the compacting child by `agentId`; it never
 replaces the older projected prefix. Child attachments rendered as text are
-passed verbatim and unscored. An opaque block the host cannot rebuild triggers
-only that cut's logged exception. New arrivals during scoring are restored before
+passed verbatim and unscored. Opaque blocks are logged, text is retained, and
+missing anchors resolve by occurrence and transcript order. New arrivals during scoring are restored before
 returning history. No persistent shared store is written. Jev replacements rebuild
 pin provenance as one separate metadata row for the next reload/resume; original
 instruction rows remain verbatim. Replacements rebuild
@@ -110,6 +110,8 @@ system/tool prefix; judge total depth using the next request's actual usage.
 ## Scope and caveat
 
 Function hooks are early access and may change between Claude Code releases.
+Without the `session.compact` event no supported API installs replacement rows;
+the usage hook logs that incompatibility and requests no built-in summary.
 This mod uses the generated declarations from 2.1.274 in
 `types/claude-code.d.ts`; regenerate and review that file after a
 Claude Code upgrade.

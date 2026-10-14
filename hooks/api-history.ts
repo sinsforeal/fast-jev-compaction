@@ -1,5 +1,5 @@
 import type { SessionMessage } from 'claude-code';
-import { FidelityError, type FidelityLedger } from './fidelity.js';
+import { type FidelityLedger } from './fidelity.js';
 import { isPinProvenance } from './pin-provenance.js';
 
 /** Supplemental 2.1.299 contract: W2o/IXt expose a bounded API tail for the
@@ -40,6 +40,8 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
     return candidates.length === 1 ? candidates : [];
   });
   const claimed = new Set<number>();
+  const consumed = new Set<number>();
+  let transcriptCursor = 0;
   for (let j = 0; j < api.length; j++) {
     const m = api[j]!;
     if (m.role !== 'user') continue;
@@ -62,31 +64,44 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
       low = following;
       while (low > 0 && projected[low - 1]!.role === 'user') low--;
     }
-    const matches = projected.flatMap((p, i) => i >= low && i < high && p.role === 'user' && p.text && text[j]!.includes(p.text) ? [i] : []);
+    low = Math.max(low, transcriptCursor);
+    const candidates = projected.flatMap((p, i) => i >= low && i < high && !consumed.has(i) && p.role === 'user' && p.text && text[j]!.includes(p.text) ? [i] : []);
     if (prior === undefined && following === undefined && !anchors[j]!.length &&
-      matches.map(i => projected[i]!.text).join('') !== text[j]) {
-      throw new FidelityError('API hidden-text chronology has no observable anchor');
+      candidates.map(i => projected[i]!.text).join('') !== text[j]) {
+      ledger.note(`API history row ${j}: no observable anchor; transcript order used at ${low}`);
     }
-    // Multiple occurrences of the same short prompt cannot establish position
-    // unless the API's neighbouring tool/text anchors disambiguate them.
-    if (matches.some((i, k) => matches.slice(0, k).some(n => projected[n]!.text === projected[i]!.text))) {
-      if (matches.map(i => projected[i]!.text).join('') === text[j]) continue;
-      if (matches.every(i => projected[i]!.text === text[j])) continue; // no observable extra content
-      throw new FidelityError('API hidden-text chronology ambiguous between repeated projected prompts');
+    if (candidates.some((i, k) => candidates.slice(0, k).some(n => projected[n]!.text === projected[i]!.text))) {
+      ledger.note(`API history row ${j}: repeated prompts mapped by occurrence in transcript order`);
+    }
+    const spans: { start: number; end: number; index: number }[] = [];
+    let previousStart = -1;
+    for (const index of candidates) {
+      const p = projected[index]!;
+      let start = text[j]!.indexOf(p.text);
+      while (start >= 0 && spans.some(s => start < s.end && start + p.text.length > s.start)) {
+        start = text[j]!.indexOf(p.text, start + 1);
+      }
+      if (start < 0) continue; // API contains fewer occurrences than the projection
+      if (start < previousStart) {
+        ledger.note(`API history row ${j}: text order conflict at projected row ${index}; transcript order retained`);
+      }
+      previousStart = start;
+      spans.push({ start, end: start + p.text.length, index });
+      consumed.add(index);
+      transcriptCursor = Math.max(transcriptCursor, index + 1);
     }
     let cursor = 0;
-    let last = anchors[j]!.at(-1) ?? prior;
-    for (const index of matches) {
-      const p = projected[index]!;
-      const start = text[j]!.indexOf(p.text, cursor);
-      if (start < 0) throw new FidelityError('API text order conflicts with compaction projection');
-      if (start > cursor) ledger.recover(text[j]!.slice(cursor, start), index, projected, scope, claimed);
-      cursor = start + p.text.length;
-      last = index;
+    let last = anchors[j]!.at(-1) ?? prior ?? (low > 0 ? low - 1 : undefined);
+    // Cover visible text even when API order conflicts. It stays in transcript
+    // order; recover only uncovered spans, so no visible prompt is duplicated.
+    for (const span of spans.sort((a, b) => a.start - b.start)) {
+      if (span.start > cursor) ledger.recover(text[j]!.slice(cursor, span.start), span.index, projected, scope, claimed);
+      cursor = span.end;
+      last = span.index;
     }
     if (cursor < text[j]!.length) {
-      const position = last === undefined ? following : last + 1;
-      if (position === undefined && projected.length) throw new FidelityError('API hidden-text chronology has no observable anchor');
+      const position = last === undefined ? following ?? transcriptCursor : last + 1;
+      if (last === undefined && following === undefined) ledger.note(`API history row ${j}: hidden text placed by transcript order at ${position}`);
       ledger.recover(text[j]!.slice(cursor), position ?? 0, projected, scope, claimed);
     }
   }

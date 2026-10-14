@@ -13,7 +13,7 @@ it matters later. This library retains the projected history while removing stal
 tool evidence and recognized injected blocks. Old long assistant replies can be
 abridged to their opening and closing. Untagged user text and fenced examples stay
 verbatim. Mid-turn instructions and rendered queued deliveries are pinned verbatim,
-including after resume and in child loops. Depth and reduction are measurements.
+including after resume and in child loops. Depth is measured; reduction gates the cut.
 
 The repository is both an npm package (`src/`) and a Claude Code plugin
 (`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
@@ -136,9 +136,9 @@ stage was needed, and the number of requests.
   was verified on Claude Code 2.1.299. Older hosts may reject it during scanning;
   retain the 0.3.0 cache for rollback. Organization-managed installations can skip
   user-installed compaction hooks under managed policy.
-- Handleless cuts discard unprojected assistant thinking. Observed opaque user
-  content that the host cannot reconstruct requires a logged exception for that
-  cut. The API view is a bounded tail: it supplements the projection rather than
+- Handleless cuts discard unprojected assistant thinking and opaque media. Text
+  blocks stay; dropped block kinds are logged. The API view is a bounded tail:
+  it supplements the projection rather than
   replacing older history, and cannot prove unseen content outside that tail.
 - Calibration is at the request level; a probability is not a proof that a
   result is safe to delete. The assistant can always re-run the tool.
@@ -162,30 +162,31 @@ inserted before returning the replacement. Rows get fresh host IDs and parents.
 One separate provenance row records fingerprints and occurrence numbers of pinned
 rows, so reload/resume preserves their pin status without changing instruction
 text or writing a shared store. It is replaced, rather than multiplied, per cut.
-`maxPostCompactTokens` (default 0) and `minReductionRatio` only report warnings;
-neither can request a summary at any configured value.
+`maxPostCompactTokens` (default 0) only warns. `minReductionRatio` (default 0.25)
+is the sole built-in-summary gate: actual replacement characters, including pin
+provenance, must meet that reduction. Equal-to-threshold cuts are retained.
 
-The exhaustive reasons for yielding to the built-in summary are:
+Repeated prompts map by occurrence within observable anchors, then transcript
+order when anchors are absent. API order conflicts retain the projected order
+and recover only text spans not already represented. Every choice is logged.
+Observer content gaps keep whatever text the transcript exposes and log the gap.
 
-- `request_failure`: Jev transport failure after one retry, retryable HTTP failure
-  after the retry, non-retryable HTTP rejection, or an unavailable API key.
-- `invalid_engine_result`: malformed/missing answers or a non-finite/out-of-range
-  probability. Invalid results never remove history.
-- `host_without_compaction_event`: the host cannot run `session.compact`. The
-  usage-request path toasts/logs this reason if registration can continue; a host
-  rejecting the module before registration runs its own compactor.
-- `unreconstructable_delivery`: the brief's explicit per-cut fidelity exception.
-  A known delivery lacks observable content, contains opaque blocks unsupported
-  by the host's handleless `SessionMessage` schema, a submitted attachment exposes
-  metadata without a reconstructable delivery, or observed chronology cannot be
-  aligned unambiguously. The toast names the exact fixed reason for that cut.
-  This is never a startup, resume, subagent or persistent safety flag.
+Request failures after retry, missing keys, invalid engine results and local
+preparation failures use deterministic transcript recovery: preserve all text,
+calls, pinned/recent results, and truncate eligible older results using the
+existing head/evidence-note policy. Recovery is explicitly unscored. It passes
+through the same reduction gate; a missed ratio can still request core.
+
+A host without `session.compact` has no supported replacement installation API.
+The usage hook logs that incompatibility and requests no built-in summary.
+Such a host needs a compatible runtime before it can apply Jev replacements.
 
 Every plugin-controlled fallback toasts its reason. With `logDecisions: true`,
 the decision log also includes cumulative session-local fallback counts by reason,
 alongside kept/dropped probabilities. Error bodies and credentials are omitted.
-Local state-budget/preparation failures veto that cut with history unchanged;
-they do not call the summary. Speculative `precompute` remains vetoed.
+Recovery reasons and chronology decisions also go to
+`~/.claude/fast-jev-compaction.log`. Disk/UI failures never change a cut.
+Speculative `precompute` remains vetoed.
 
 ### Install in Claude Code
 
@@ -210,9 +211,11 @@ Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
 `fast-jev-compaction: kept N/M messages, no summary (…; replacement prepared …)`
 when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
-cannot safely supply a replacement for one of the fidelity reasons above.
+does not meet the configured reduction ratio.
 
-The branch-qualified source above installs 0.4.1 without promoting the fork's
+The branch-qualified source above is the historical 0.4.1 release lane. The
+0.4.4 candidate is on `fidelity/jev-041-20261014`; Ryan v2 owns its installation
+under queue 0f83ff731638. This build does not promote the fork's
 default branch. For an existing declared source, preserve unrelated fields and
 set its GitHub `repo` to `sinsforeal/fast-jev-compaction` and `ref` to
 `fix/our-use-20261014` before the add/update commands. Confirm both marketplace

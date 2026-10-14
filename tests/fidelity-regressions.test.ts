@@ -11,7 +11,9 @@ const history = () => [m('user', 'task', { handle: 'u' }),
 function harness(options = {}) {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...args: any[]) => { handlers[name] = args.at(-1); }) as any,
-    { apiKey: 'fixture', preserveRecentMessages: 1, ...options });
+    // Fidelity gates isolate retention/order, including provenance growth.
+    // 044 production-ratio gates live in ratio-only-regressions.test.ts.
+    { apiKey: 'fixture', preserveRecentMessages: 1, minReductionRatio: -100, ...options });
   let rows = history();
   const logs: string[] = [];
   const fetch = vi.fn(async (_url, init) => ({ status: 200, ok: true,
@@ -41,9 +43,10 @@ it('041: an exceeded token target warns and keeps Jev at every positive value', 
   expect(h.logs.some(s => s.startsWith('kept ') && s.includes('target 1'))).toBe(true);
   expect(h.logs.some(s => s.startsWith('warn:'))).toBe(true);
 });
-it('041: no reduction still returns verbatim Jev replacement', async () => {
+it('044: no reduction is the allowed built-in fallback', async () => {
   const h = harness({ minReductionRatio: 1 }); h.setRows([m('user', 'task'), m('assistant', 'fact')]);
-  const out = await h.cut(); expect(h.core).not.toHaveBeenCalled(); expect(out.messages[1].text).toBe('fact');
+  await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
+  expect(h.logs.join(' ')).toContain('reduction below 100% minimum');
 });
 it('041: accepted mid-turn prompt omitted by projection is pinned in chronological order', async () => {
   const h = harness(); h.setRows(history().slice(0, 3));
@@ -74,19 +77,20 @@ it('041: subagent queued rendered attachment remains verbatim without scoring or
   expect(out.messages.some(row => row.text === text)).toBe(true);
   expect(h.fetch.mock.calls.every(([, init]) => !Object.values(JSON.parse(init.body).questions).some((q: any) => q.instructions.includes('system reminder')))).toBe(true);
 });
-it('041: request failure retries once and counts its reason without logging transport text', async () => {
+it('044: request failure retries once and logs transcript recovery without transport text', async () => {
   const h = harness({ logDecisions: true });
   h.fetch.mockImplementation(async () => { throw new Error('sensitive fixture echo'); });
   await h.cut(); await h.cut();
-  expect(h.fetch).toHaveBeenCalledTimes(4); expect(h.core).toHaveBeenCalledTimes(2);
-  expect(h.logs.some(s => s.includes('fallback counts:') && s.includes('request_failure=2'))).toBe(true);
+  expect(h.fetch).toHaveBeenCalledTimes(4); expect(h.core).not.toHaveBeenCalled();
+  expect(h.logs.filter(s => s.startsWith('Jev transcript recovery'))).toHaveLength(2);
   expect(h.logs.join('\n')).not.toContain('sensitive fixture echo');
 });
-it('041: invalid engine answer counts separately from transport failure', async () => {
+it('044: invalid engine answer logs transcript recovery', async () => {
   const h = harness({ logDecisions: true });
   h.fetch.mockImplementation(async () => ({ status: 200, ok: true, text: '{"answers":{"call_t1":{"noul":2},"result_t1":{"noul":0}}}' }));
   await h.cut();
-  expect(h.logs.some(s => s.includes('fallback counts:') && s.includes('invalid_engine_result=1'))).toBe(true);
+  expect(h.logs.some(s => s.includes('invalid or out-of-range Jev engine result'))).toBe(true);
+  expect(h.core).not.toHaveBeenCalled();
 });
 
 it('041: equal older text is not mistaken for a later hidden instruction across two cuts', async () => {
@@ -163,7 +167,8 @@ it('042: toasts and log lines are appended to ~/.claude/fast-jev-compaction.log'
   await h.cut();
   const after = files.get('C:\\Users\\x/.claude/fast-jev-compaction.log') ?? '';
   expect(after.startsWith(text)).toBe(true);
-  expect(after).toContain('fallback to built-in summary');
+  expect(after).toContain('Jev transcript recovery');
+  expect(after).not.toContain('fallback to built-in summary');
 });
 it('042: a log write failure never changes the cut', async () => {
   const h = harness();
@@ -173,17 +178,17 @@ it('042: a log write failure never changes the cut', async () => {
   const out = await h.cut();
   expect(h.core).not.toHaveBeenCalled(); expect(out.messages.length).toBeGreaterThan(0);
 });
-it('041: malformed answer primitives use the invalid-result fallback, never an unclassified skip', async () => {
+it('044: malformed answer primitives use transcript recovery', async () => {
   const h = harness({ logDecisions: true });
   h.fetch.mockImplementation(async () => ({ status: 200, ok: true, text: '{"answers":{"call_t1":1,"result_t1":{"noul":0}}}' }));
-  await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
-  expect(h.logs.some(s => s.includes('invalid_engine_result=1'))).toBe(true);
+  await h.cut(); expect(h.core).not.toHaveBeenCalled();
+  expect(h.logs.some(s => s.includes('invalid or out-of-range Jev engine result'))).toBe(true);
 });
-it('041: local state-budget refusal preserves history without requesting a summary', async () => {
+it('044: local state-budget refusal compacts transcript without requesting a summary', async () => {
   const h = harness({ maxRequestTokens: 1 }); const out = await h.cut();
-  expect(out.skip).toBeDefined(); expect(h.core).not.toHaveBeenCalled();
+  expect(out.skip).toBeUndefined(); expect(out.messages.length).toBeGreaterThan(0); expect(h.core).not.toHaveBeenCalled();
 });
-it('041: missing compact event is counted and toasted at the plugin usage request', async () => {
+it('044: missing compact event is toasted without requesting core', async () => {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...args: any[]) => { if (name === 'session.compact') throw new Error('unsupported'); handlers[name] = args.at(-1); }) as any,
     { logDecisions: true });
@@ -191,7 +196,7 @@ it('041: missing compact event is counted and toasted at the plugin usage reques
   const $ = { ui: { log: (s: string) => logs.push(s), toast: vi.fn() }, session: {
     usage: async () => ({ context: { percent: 70 } }), compact: vi.fn(async () => ({ messages: [] })) } };
   await handlers['turn.complete']($, {}, async e => e);
-  expect(logs.some(s => s.includes('host_without_compaction_event=1'))).toBe(true);
+  expect($.session.compact).not.toHaveBeenCalled();
   expect($.ui.toast).toHaveBeenCalledWith(expect.stringContaining('host has no session.compact event'), expect.anything());
 });
 
@@ -305,11 +310,12 @@ it('041: recovered delivery stays pinned after a new registration and four resum
     expect(rows.every(m => !m.handle)).toBe(true);
   }
 });
-it('041: additional hidden API text without a chronology anchor uses a specific one-cut exception', async () => {
+it('044: additional hidden API text without an anchor uses transcript order', async () => {
   const h = harness(); h.setRows([m('user', 'task')]);
   h.$.session.messages = async (args?: any) => args?.as === 'api' ? [{ role: 'user', content: [{ type: 'text', text: 'task hidden extra' }] }] as any : [m('user', 'task')];
-  await h.cut(); expect(h.logs.some(s => s.includes('API hidden-text chronology has no observable anchor'))).toBe(true);
-  h.$.session.messages = async () => [m('user', 'task')]; await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
+  const out = await h.cut(); expect(h.logs.some(s => s.includes('no observable anchor; transcript order'))).toBe(true);
+  expect(out.messages.some(m => m.text === ' hidden extra')).toBe(true);
+  h.$.session.messages = async () => [m('user', 'task')]; await h.cut(); expect(h.core).not.toHaveBeenCalled();
 });
 
 it('041: actual API adjacent-user normalization never duplicates provenance on reload', async () => {

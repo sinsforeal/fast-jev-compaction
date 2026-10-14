@@ -95,21 +95,22 @@ describe('applied versus speculative cuts and safe fallback', () => {
     expect(h.$.http.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('retains an unreconstructable row when core skips, and never retries a failed core', async () => {
-    // Adapted for 0.4.1 brief: only a demonstrated unreconstructable row can require core.
-    // 0.4.2: an opaque block no longer is one (noted, text kept); an observer that omitted
-    // the content blocks still is, so that is the row used here.
+  it('044: missing observer content logs and compacts observable transcript on every cut', async () => {
+    // User 15:23: only a missed reduction ratio permits built-in summary.
     const h = harness();
     await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque',
       message: { type: 'attachment' } }, async e => e);
     await h.handlers['session.compact'](h.$, h.event(), async () => ({ skip: 'blocked' }));
     await h.handlers['session.compact'](h.$, h.event(), h.core);
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(2);
+    expect(h.core).not.toHaveBeenCalled();
     await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque2',
       message: { type: 'attachment' } }, async e => e);
     const broken = vi.fn(async () => { throw new Error('core failed'); });
-    await expect(h.handlers['session.compact'](h.$, h.event(), broken)).rejects.toThrow('core failed');
-    expect(broken).toHaveBeenCalledTimes(1);
+    const out = await h.handlers['session.compact'](h.$, h.event(), broken);
+    expect(out.messages.length).toBeGreaterThan(0);
+    expect(broken).not.toHaveBeenCalled();
+    expect(h.logs.join(' ')).toContain('observer omitted content blocks');
   });
 
   it('does not establish a blanket summary policy when the delivery observer is unavailable', async () => {

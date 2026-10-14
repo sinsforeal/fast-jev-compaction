@@ -1,1 +1,1 @@
-docs: start Jev 0.4.4 ratio-only fallback notebook
+0.4.4: resolve fidelity chronology and make reduction ratio the only summary fallback

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.4 - 2026-10-14
+
+Source: the User, 15:23 local: "I need jev to actually work everytime. The only
+time it should not work is if the reduction ratio is not met." Ryan's 15:19
+cut hit repeated projected prompts without an intervening text/tool anchor.
+This order supersedes the 0.4.1 fallback exceptions below.
+
+- API chronology no longer throws FidelityError. Repeated prompts consume
+  projected occurrences in order. Missing anchors use transcript order, with
+  a log note. Conflicting text order preserves visible prompts and recovers
+  only uncovered spans. Snapshot anchors select occurrences, not first text.
+- Missing observer content/anchors retain observable transcript text and log
+  the gap. Unknown media is still not representable by handleless rows.
+- Request/key/result/preparation failures produce unscored transcript recovery:
+  all text and calls stay, eligible old results use the existing truncation and
+  evidence notes. Late deliveries stay pinned. The actual replacement,
+  including provenance, passes the reduction gate. Only a missed ratio invokes
+  the built-in summary. Depth continues to warn only.
+- Notifications write disk first; UI failures cannot lose a prepared cut.
+  Every recovery reason goes to ~/.claude/fast-jev-compaction.log.
+- A host without session.compact never receives a plugin request to core.
+  It logs incompatibility. The public host contract has no alternate transcript
+  installer; compatible-runtime installation stays with Ryan's existing release
+  queue 0f83ff731638. No fabricated setter or direct JSONL write is introduced.
+- All 15 new gates fail on pinned 38b2b03 and pass here. The full suite passes
+  120/120, with library/hook typechecks and build. Reproduction:
+  `python tools/jev_044_gates.py`. Existing fidelity gates explicitly isolate
+  retention/order from the newly restored reduction policy.
+
 ## 0.4.3 - 2026-10-14
 
 Source: the User, 2026-10-14 11:58, on Ryan v2's 11:57 compaction (351,458 to 8,330 tokens, 69 s,

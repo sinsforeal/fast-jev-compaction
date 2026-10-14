@@ -93,7 +93,10 @@ export class FidelityLedger {
     const claimed = new Set<number>();
     const inserts = new Map<number, Message[]>();
     for (const row of this.rows.filter(r => r.scope === scope)) {
-      if (row.problem) throw new FidelityError(row.problem);
+      if (row.problem) {
+        this.note(`${row.problem}; observable transcript text retained`);
+        if (row.text === undefined) continue;
+      }
       let at = row.uuid ? handles.get(row.uuid) : undefined;
       if (at === undefined) {
         // Rebuilt rows receive fresh host UUIDs. Match each retained pinned row
@@ -129,13 +132,20 @@ export class FidelityLedger {
         // Search backwards through the actual pre-delivery snapshot. A tool
         // result can be the anchor even when a later projected row follows it.
         for (let i = row.anchor.length - 1; i >= 0; i--) {
-          const index = messages.findIndex(m => key(m) === row.anchor[i]);
+          // Equal prompts are distinct rows. Select the same occurrence from
+          // the pre-delivery snapshot instead of its first equal text.
+          const occurrence = row.anchor.slice(0, i + 1).filter(k => k === row.anchor[i]).length - 1;
+          const matches = messages.flatMap((m, n) => key(m) === row.anchor[i] ? [n] : []);
+          const index = matches[Math.min(occurrence, matches.length - 1)] ?? -1;
           if (index >= 0) { position = index + 1; break; }
         }
       }
       if (position === undefined) {
         if (!messages.length || !row.anchor.length && !this.timeline.some(t => t.scope === scope && t.sequence < row.sequence)) position = 0;
-        else throw new FidelityError('delivery chronology unavailable: no surviving UUID or snapshot anchor');
+        else {
+          position = messages.length;
+          this.note('delivery chronology unavailable: no surviving UUID or snapshot anchor; observer order used at transcript end');
+        }
       }
       const list = inserts.get(position) ?? [];
       list.push({ role: 'user', text: row.text!, toolUses: [], pinned: true,
@@ -163,7 +173,7 @@ export class FidelityLedger {
       if (index < 0) continue;
       row.occurrence = messages.slice(0, index).filter(m => m.role === 'user' &&
         (row.prompt ? m.text.includes(row.text!) : m.text === row.text)).length;
-      row.anchor = index > 0 ? [key(messages[index - 1]!)] : [];
+      row.anchor = messages.slice(0, index).map(key);
       row.beforeUuid = undefined;
     }
     // UUID chronology is only needed for arrivals since this accepted cut.

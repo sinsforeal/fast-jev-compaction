@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
@@ -31,8 +31,8 @@
     },
     "minReductionRatio": {
       "type": "number",
-      "title": "Reduction report threshold",
-      "description": "Warn below this visible character reduction; never triggers built-in summary.",
+      "title": "Minimum reduction ratio",
+      "description": "Use built-in summary only below this visible character reduction ratio.",
       "default": 0.25
     },
     "maxStateTokens": {

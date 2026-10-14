@@ -8,10 +8,10 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-import { compact, messageChars, reductionRatio, resolveOptions } from '../src/compact.js';
-import { estimateTokens } from '../src/state.js';
+import { applyDecisions, compact, decideCall, messageChars, reductionRatio, resolveOptions } from '../src/compact.js';
+import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
-import { FidelityLedger, FidelityError } from './fidelity.js';
+import { FidelityLedger } from './fidelity.js';
 import { recoverApiHistory, type RuntimeMessages } from './api-history.js';
 import { readPinProvenance, persistPinProvenance, pinProvenanceTexts } from './pin-provenance.js';
 import {
@@ -225,6 +225,34 @@ export type SessionCompaction = {
   messages: SessionMessage[];
 };
 
+/** Offline recovery uses only the transcript: preserve every call and text,
+ * truncate eligible old results using the existing evidence-marker policy.
+ * No invented probabilities, network request or summary. */
+function compactTranscript(messages: readonly Message[], config: HookConfig): CompactResult {
+  const resolved = resolveOptions(config);
+  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
+  const decisions = calls.map(call => decideCall(call, { keepCall: 1, keepResult: 0 }, { keepThreshold: 0.5 }));
+  const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
+  return { messages: kept, decisions: [], textDecisions: [], stats: {
+    messagesBefore: messages.length, messagesAfter: kept.length,
+    charsBefore: messages.reduce((n, m) => n + messageChars(m), 0),
+    charsAfter: kept.reduce((n, m) => n + messageChars(m), 0),
+    calls: calls.length, kept: 0, resultsDropped: decisions.filter(d => d.action === 'drop_result').length,
+    callsDropped: 0, pinned: calls.filter(c => c.pinned).length,
+    texts: 0, textsRemoved: 0, duplicatesRemoved: 0, repliesAbridged: 0, textsUnrepresented: 0,
+    stateTokens: 0, stateStage: 'transcript recovery (unscored)', requests: 0, ms: 0,
+  } };
+}
+
+function recoveryReason(error: unknown): string {
+  if (error instanceof JevHttpError) return `Jev HTTP ${error.status}; retry policy exhausted`;
+  if (error instanceof JevRequestError) return error.message;
+  if (error instanceof JevResultError) return 'invalid or out-of-range Jev engine result';
+  // Arbitrary transport messages may contain secrets or output. Keep the error
+  // class and a fixed diagnostic reason; never echo their bodies.
+  return 'local transcript preparation or scoring failed';
+}
+
 /** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
 export async function compactSession(
   messages: readonly SessionMessage[],
@@ -344,14 +372,14 @@ async function appendLog($: LogHost, text: string): Promise<void> {
 }
 
 async function log($: LogHost, text: string): Promise<void> {
-  $.ui.log(text);
   await appendLog($, text);
+  try { $.ui.log(text); } catch { /* UI failure cannot change compaction. */ }
 }
 
 async function notify($: LogHost, text: string): Promise<void> {
-  $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
   await appendLog($, text);
+  try { $.ui.log(text); } catch { /* UI failure cannot change compaction. */ }
+  try { $.ui.toast(text, { timeoutMs: 15_000 }); } catch { /* Disk receipt already written. */ }
 }
 
 function countFallback(
@@ -359,7 +387,7 @@ function countFallback(
   counts: Map<string, number>, reason: string, enabled: boolean,
 ): void {
   counts.set(reason, (counts.get(reason) ?? 0) + 1);
-  if (enabled) $.ui.log(`fallback counts: ${Array.from(counts, ([r, n]) => `${r}=${n}`).join(' ')}`);
+  if (enabled) try { $.ui.log(`fallback counts: ${Array.from(counts, ([r, n]) => `${r}=${n}`).join(' ')}`); } catch { /* diagnostic only */ }
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -409,17 +437,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
       return result;
     };
     let prepared: SessionCompaction;
+    const projection = readPinProvenance(event.messages);
+    let input: Message[] = projection;
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const projection = readPinProvenance(event.messages);
       // The actual host exposes rendered queued rows in its API-tail view. It
       // also accepts agentId; $.session.messages() without it is main-only.
       // Feature-detect by shape so older hosts/visible-only fixtures still use
       // the observer path, never a blanket startup summary.
       let apiHistory: unknown;
-      try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); } catch { /* optional host capability */ }
+      try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); }
+      catch { await log($, 'fidelity: API history unavailable; observable transcript order used'); }
       recoverApiHistory(apiHistory, projection, ledger, event.agentId, pinProvenanceTexts(event.messages));
-      const input = ledger.prepare(projection, event.agentId);
+      input = ledger.prepare(projection, event.agentId);
       for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
       if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
       const asker = jevAsker(async (url, init) => {
@@ -436,29 +466,31 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const pins = new Set<number>();
       prepared = { result, messages: persistPinProvenance(toSessionMessages(event.messages, result.messages, pins), pins) };
     } catch (error) {
-      if (error instanceof FidelityError) return fallback('unreconstructable_delivery', error.message);
-      if (error instanceof JevHttpError) return fallback('request_failure', `Jev HTTP ${error.status}; retry policy exhausted`);
-      if (error instanceof JevRequestError) return fallback('request_failure', error.message);
-      if (error instanceof JevResultError) return fallback('invalid_engine_result', 'invalid or out-of-range Jev engine result');
-      // Local state-budget/preparation refusal must not turn Jev into a summary.
-      await notify($, 'Jev cut skipped (local preparation failed; history unchanged; details omitted)');
-      return { skip: 'Jev local preparation failed; history unchanged' };
+      await log($, `Jev transcript recovery (${recoveryReason(error)})`);
+      // Include deliveries that arrived while a failed request was in flight.
+      input = ledger.prepare(projection, event.agentId);
+      for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
+      const result = compactTranscript(input, configured);
+      const pins = new Set<number>();
+      prepared = { result, messages: persistPinProvenance(toSessionMessages(event.messages, result.messages, pins), pins) };
     }
     const { result, messages } = prepared;
+    // The gate measures the actual replacement, including pin provenance.
+    result.stats.charsAfter = messages.reduce((n, m) => n + messageChars(m), 0);
     if (configured.logDecisions) for (const line of decisionLogLines(result)) await log($, line);
     const post = estimateSessionTokens(messages);
     if (configured.maxPostCompactTokens > 0 && post > configured.maxPostCompactTokens) {
       await log($, `warn: estimated visible post-cut ~${post} tokens exceeds target ${configured.maxPostCompactTokens}; Jev replacement retained`);
     }
     if (reductionRatio(result) < configured.minReductionRatio) {
-      await log($, `warn: reduction below ${percent(configured.minReductionRatio)} report threshold; Jev replacement retained`);
+      return fallback('reduction_ratio', `reduction below ${percent(configured.minReductionRatio)} minimum`);
     }
     await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
     ledger.rebase(result.messages, event.agentId);
     return { messages };
   }); supportsCompaction = true; } catch {
-    // Hosts predating session.compact keep their own summarizer. The plugin's
-    // usage hook reports this reason whenever it requests a cut on such a host.
+    // No supported installation surface exists without this event. Never call
+    // the host compactor here: it would invoke the forbidden built-in summary.
   }
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
@@ -470,8 +502,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       compacting = true;
       ownsCompaction = true;
       if (!supportsCompaction) {
-        await notify($, 'fallback to built-in summary (host has no session.compact event)');
-        countFallback($, fallbackCounts, 'host_without_compaction_event', configured.logDecisions);
+        await notify($, 'Jev cannot install replacement: host has no session.compact event; built-in summary not requested');
+        return next(event);
       }
       const outcome = await $.session.compact();
       if (outcome.skip === undefined && outcome.tokensAfter !== undefined) {
