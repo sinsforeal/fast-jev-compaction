@@ -134,18 +134,28 @@ describe('hook', () => {
     expect(b.logs.some(l => l.includes('target fit'))).toBe(false);
   });
   it('Jev unavailable: a hybrid session skips with a marker and leaves the cut to the handoff; another session keeps the recovery cut', async () => {
+    // tool calls are needed, else no Jev question is asked and the transport is never touched
+    const toolRows = (): Message[] => {
+      const rows: Message[] = [m('user', 'task', { handle: 'u0' })];
+      for (let i = 0; i < 3; i++) {
+        rows.push(m('assistant', '', { handle: `c${i}`, toolUses: [{ tool_use_id: `u${i}`, tool: 'Read', input: { i } }] }));
+        rows.push(m('user', '', { handle: `r${i}`, toolResults: [{ tool_use_id: `u${i}`, text: `row${i} `.repeat(500) }] }));
+      }
+      rows.push(m('assistant', 'end', { handle: 'a' }), m('user', 'go', { handle: 'u1' }));
+      return rows;
+    };
     const h = harness({ handoffDir: 'F:/handoffs' });
-    h.$.http.fetch = vi.fn(async () => { throw new Error('ECONNREFUSED'); });
+    (h.$.http.fetch as any).mockImplementation(async () => { throw new Error('ECONNREFUSED'); });
     const next = vi.fn();
-    const out = await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, next);
+    const out = await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: toolRows() }, next);
     expect(out.skip).toContain('Jev unavailable');
     expect(next).not.toHaveBeenCalled();
     const marker = JSON.parse(h.files.get(`F:/handoffs/${SID}/prune_skipped.json`)!);
     expect(marker.reason).toContain('Jev unavailable');
     expect(h.logs.some(l => l.includes('handoff takes over'))).toBe(true);
     const o = harness({}, 200000, false);
-    o.$.http.fetch = vi.fn(async () => { throw new Error('ECONNREFUSED'); });
-    const cut = await o.handlers['session.compact'](o.$, { trigger: 'auto', messages: o.rows }, vi.fn());
+    (o.$.http.fetch as any).mockImplementation(async () => { throw new Error('ECONNREFUSED'); });
+    const cut = await o.handlers['session.compact'](o.$, { trigger: 'auto', messages: toolRows() }, vi.fn());
     expect(cut.skip).toBeUndefined();
     expect(Array.isArray(cut.messages)).toBe(true);
     expect(o.logs.some(l => l.includes('transcript recovery'))).toBe(true);

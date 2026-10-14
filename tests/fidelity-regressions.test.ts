@@ -186,7 +186,8 @@ it('044: malformed answer primitives use transcript recovery', async () => {
   expect(h.logs.some(s => s.includes('invalid or out-of-range Jev engine result'))).toBe(true);
 });
 it('044: local state-budget refusal compacts transcript without requesting a summary', async () => {
-  const h = harness({ maxRequestTokens: 1 }); const out = await h.cut();
+  const h = harness({ maxRequestTokens: 1 }); h.$.env.get = async () => undefined as any; // non-hybrid session: keeps the recovery cut
+  const out = await h.cut();
   expect(out.skip).toBeUndefined(); expect(out.messages.length).toBeGreaterThan(0); expect(h.core).not.toHaveBeenCalled();
 });
 it('044: missing compact event is toasted without requesting core', async () => {
