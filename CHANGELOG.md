@@ -9,7 +9,7 @@ size, and when the unprunable context reaches two thresholds it orders the
 session to write a handoff, forces it, clears the session itself and resumes it
 from the handoff file. The built-in summary is never requested.
 
-- `compactAtTokens` (default 128000): the `turn.complete` trigger compares
+- `compactAtTokens` (default 160000): the `turn.complete` trigger compares
   `context.tokens` against it. `compactAtPercent` still applies when it is unset.
 - `targetVisibleTokens` (default 64000): after the first pass the cut is re-decided
   from the cached Jev probabilities with a rising `keepThreshold` (0.05 steps,

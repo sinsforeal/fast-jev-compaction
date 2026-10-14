@@ -161,6 +161,8 @@ stage was needed, and the number of requests.
   was verified on Claude Code 2.1.299. Older hosts may reject it during scanning;
   retain the 0.3.0 cache for rollback. Organization-managed installations can skip
   user-installed compaction hooks under managed policy.
+- `targetVisibleTokens` counts the visible messages only, so the real context
+  after a prune is the target plus the system and tool prefix.
 - Handleless cuts discard unprojected assistant thinking and opaque media. Text
   blocks stay; dropped block kinds are logged. The API view is a bounded tail:
   it supplements the projection rather than
@@ -188,8 +190,8 @@ One separate provenance row records fingerprints and occurrence numbers of pinne
 rows, so reload/resume preserves their pin status without changing instruction
 text or writing a shared store. It is replaced, rather than multiplied, per cut.
 `maxPostCompactTokens` (default 0) only warns. `minReductionRatio` (default 0.25)
-is the sole built-in-summary gate: actual replacement characters, including pin
-provenance, must meet that reduction. Equal-to-threshold cuts are retained.
+is the skip gate: actual replacement characters, including pin
+provenance, must meet that reduction or the cut is skipped. Equal-to-threshold cuts are retained.
 
 Repeated prompts map by occurrence within observable anchors, then transcript
 order when anchors are absent. API order conflicts retain the projected order

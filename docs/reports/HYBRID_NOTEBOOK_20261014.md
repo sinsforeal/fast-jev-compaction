@@ -29,4 +29,7 @@ Still owed (pick up here): CHANGELOG 0.5.0 entry; README cleanup (Fidelity rules
 4. `claude plugin validate .` on the worktree.
 5. Optional tests: logDecisions skip counts; session.compact with targetVisibleTokens end to end (only fitTarget is unit tested).
 
+## Stage at 18:45 (third agent, docs)
+Docs done. Found on arrival: CHANGELOG 0.5.0 entry, README options/handoff/install/fidelity text and hooks/README config table and trigger text were already rewritten for 0.5.0. Fixed what was left: CHANGELOG said compactAtTokens default 128000 (now 160000); README "sole built-in-summary gate" for minReductionRatio reworded to a skip gate; the targetVisibleTokens "visible messages only" sentence added to README Limitations. Noted: README handoffAt/handoffForceAt rows say "visible size" while the order texts say "unprunable context"; same number (post-cut estimate or context.tokens), left as is. Live checks still owed: $.command.run clear, $.prompt.submit detached, session id at a clear.
+
 Gotchas: node_modules installed with npm ci in the worktree (gitignored). The turn.complete handler needs $.session.id; hosts without it get no prefix and no handoff step.
