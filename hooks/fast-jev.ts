@@ -373,7 +373,7 @@ async function getApiKey(
 }
 
 type LogHost = {
-  session?: { id?: () => Promise<string> };
+  session: { id: () => Promise<string> };
   ui: { log: (text: string) => void; toast: (text: string, options?: { timeoutMs?: number }) => void };
   env: { get: (name: string) => Promise<string | undefined> };
   fs: {
@@ -405,9 +405,9 @@ async function appendLog($: LogHost, text: string): Promise<void> {
 /** 0.5.0: every log and notify line starts with the first 8 characters of the session id
  * (`[1ef048ab] ...`), so three sessions' lines in one disk log can be told apart.
  * No id (a host without `session.id`) leaves the line as it is. */
-async function tag($: { session?: { id?: () => Promise<string> } }, text: string): Promise<string> {
+async function tag($: { session: { id: () => Promise<string> } }, text: string): Promise<string> {
   try {
-    const id = await $.session?.id?.();
+    const id = await $.session.id();
     if (typeof id === 'string' && id.length > 0) return `[${id.slice(0, 8)}] ${text}`;
   } catch { /* an id that cannot be read never blocks a line */ }
   return text;
@@ -435,17 +435,17 @@ async function countFallback(
 }
 
 type SkipHost = LogHost & {
-  session?: { id?: () => Promise<string>; usage?: () => Promise<{ context: { tokens?: number } }> };
+  session: { id: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number } }> };
 };
 
 /** `<handoffDir>/<sessionId>/prune_skipped.json`: { at, reason, tokens, estimate }. Never throws. */
 async function writeSkipMarker($: SkipHost, config: HookConfig, reason: string, estimate: number): Promise<void> {
   if (!config.handoffDir) return;
   try {
-    const id = await $.session?.id?.();
+    const id = await $.session.id();
     if (!id) return;
     let tokens: number | undefined;
-    try { tokens = (await $.session?.usage?.())?.context.tokens; } catch { tokens = undefined; }
+    try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
     await $.fs.write(sessionFile(config.handoffDir, id, 'prune_skipped.json'),
       JSON.stringify({ at: new Date().toISOString(), reason, tokens: tokens ?? null, estimate }));
   } catch { /* a marker that cannot be written never changes a cut */ }
@@ -619,8 +619,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Handoff machine: main loop, not after an interrupt, and only with a handoffDir.
     if (configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
       try {
-        const host = $ as unknown as HandoffHost & { session: { id: () => Promise<string>; cwd?: () => Promise<string> } };
-        const cwd = await host.session.cwd?.().catch(() => undefined);
+        const host = $ as unknown as HandoffHost & { session: { id: () => Promise<string>; cwd: () => Promise<string> } };
+        let cwd: string | undefined;
+        try { cwd = await host.session.cwd(); } catch { cwd = undefined; }
         await handoffStep({
           host, sessionId: sid, visible,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,

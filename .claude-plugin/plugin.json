@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
@@ -26,13 +26,13 @@
     "compactAtPercent": {
       "type": "number",
       "title": "Compaction percentage",
-      "description": "Context percentage at which turn.complete requests compaction.",
+      "description": "Legacy trigger: context percentage at which turn.complete requests compaction. Used only when compactAtTokens is 0.",
       "default": 60
     },
     "minReductionRatio": {
       "type": "number",
       "title": "Minimum reduction ratio",
-      "description": "Use built-in summary only below this visible character reduction ratio.",
+      "description": "Prune is skipped, context left as it is, below this visible character reduction ratio. The built-in summary is never requested.",
       "default": 0.25
     },
     "maxStateTokens": {
@@ -76,6 +76,41 @@
       "title": "Visible post-cut token target",
       "description": "Report visible conversation size against this warning threshold; never triggers summary; excludes system/tool prefix; 0 disables the warning.",
       "default": 0
+    },
+    "compactAtTokens": {
+      "type": "number",
+      "title": "Compaction token trigger",
+      "description": "turn.complete requests a prune when the context holds at least this many tokens. Above 0 it replaces the percentage trigger; 0 uses the percentage.",
+      "default": 128000
+    },
+    "targetVisibleTokens": {
+      "type": "number",
+      "title": "Post-cut visible token target",
+      "description": "The cut is tightened over cached Jev answers until the visible messages are at or under this estimate. Counts visible messages only, not the system and tool prefix; 0 disables the target.",
+      "default": 64000
+    },
+    "handoffAt": {
+      "type": "number",
+      "title": "Handoff order size",
+      "description": "Visible tokens at which the plugin orders HANDOFF SOON, again per 50000 tokens of growth. Needs handoffDir.",
+      "default": 250000
+    },
+    "handoffForceAt": {
+      "type": "number",
+      "title": "Forced handoff size",
+      "description": "Visible tokens at which the plugin orders HANDOFF NOW; raised to handoffAt if lower. Needs handoffDir.",
+      "default": 300000
+    },
+    "handoffDir": {
+      "type": "string",
+      "title": "Handoff directory",
+      "description": "Absolute path; each session keeps latest.md, resumed.json and prune_skipped.json in a folder named by its session id. Unset turns the handoff machine off."
+    },
+    "handoffSkillPath": {
+      "type": "string",
+      "title": "Handoff skill path",
+      "description": "Path cited in the handoff orders; a relative path resolves against the session working directory.",
+      "default": "docs/HANDOFF_SKILL.md"
     },
     "logDecisions": {
       "type": "boolean",

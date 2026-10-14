@@ -18,7 +18,11 @@ Stage at 18:27: code and tests done and green (133 passed); docs partly done. Hi
 ## Tried / failed
 - A bash sed on hooks/handoff.ts was blocked by the agent_boundary hook (relative path); used Edit with absolute paths.
 
-## Remaining, in order
+## Stage at 18:30 (second agent, hit the 45-call checkpoint)
+Done: coordinator fix, no optional-chained $ noun left in hooks/ (fast-jev.ts tag/writeSkipMarker/cwd, handoff.ts pause() and plain `$.command.list()` in try; LogHost/SkipHost types now non-optional, a missing noun throws inside the existing try). Versions 0.5.0 in package.json, package-lock.json (lines 3, 9), plugin.json, marketplace.json:13. Six new userConfig entries in plugin.json. Test added in tests/hybrid.test.ts (session.compact with targetVisibleTokens 6000: no next(), estimate <= target, one Jev request). tsc x2 clean, suite 134 passed.
+Still owed (pick up here): CHANGELOG 0.5.0 entry; README cleanup (Fidelity rules para "a missed ratio can still request core" ~line 203, install line 229/241-246 "0.4.4 candidate", toast line 238 "fallback to built-in summary", config table in hooks/README.md lines 53-66 + fallback text lines 72-88, targetVisibleTokens counts visible messages only); live checks: $.command.run clear, $.prompt.submit detached, session id at a clear; orchestrator runs `claude plugin validate`.
+
+## Remaining, in order (older list; items 2 partly done above)
 1. CHANGELOG.md 0.5.0 entry (not read yet).
 2. .claude-plugin/plugin.json userConfig: add compactAtTokens, targetVisibleTokens, handoffAt, handoffForceAt, handoffDir, handoffSkillPath; bump version in plugin.json, marketplace.json (line 13), package.json (and package-lock.json) to 0.5.0; remove "branch-qualified 0.4.4" wording in README install section; update README "Fidelity rules" paragraph that still says a missed ratio can request core, and the "fallback to built-in summary" toast sentence.
 3. hooks/README.md options mention.

@@ -13,7 +13,7 @@ export type HandoffConfig = {
 
 export type HandoffHost = {
   session: { id: () => Promise<string> };
-  clock: { now: () => Promise<number>; sleep?: (ms: number) => Promise<void> };
+  clock: { now: () => Promise<number>; sleep: (ms: number) => Promise<void> };
   fs: {
     exists: (path: string) => Promise<boolean>;
     read: (path: string) => Promise<string>;
@@ -28,7 +28,7 @@ export type HandoffHost = {
   prompt: { submit: (input: { text: string }) => Promise<unknown> };
   command: {
     run: (input: { command: string; args?: string }) => Promise<unknown>;
-    list?: () => Promise<readonly { name: string }[]>;
+    list: () => Promise<readonly { name: string }[]>;
   };
 };
 
@@ -121,10 +121,14 @@ async function save(host: HandoffHost, sessionId: string, state: HandoffState): 
   await host.store.set(stateKey(sessionId), state);
 }
 
+/** Waits before a detached call; a host without a clock sleep just goes on. */
+async function pause(host: HandoffHost): Promise<void> {
+  try { await host.clock.sleep(DETACH_DELAY_MS); } catch { /* no sleep: go on */ }
+}
+
 /** Does the host list a runnable `clear`? Unknown (no list, or it throws) counts as yes: the run itself then decides. */
 async function clearAvailable(host: HandoffHost): Promise<boolean> {
   try {
-    if (!host.command.list) return true;
     return (await host.command.list()).some(c => c.name === 'clear');
   } catch {
     return true;
@@ -184,7 +188,7 @@ export async function handoffStep(ctx: StepContext): Promise<void> {
       }));
       await log(`handoff complete (${latest}); clearing the session and resuming from the file`);
       detach(async () => {
-        await host.clock.sleep?.(DETACH_DELAY_MS);
+        await pause(host);
         try {
           await host.command.run({ command: 'clear' });
         } catch {
@@ -213,7 +217,7 @@ export async function handoffStep(ctx: StepContext): Promise<void> {
         await save(host, sessionId, state);
         await log(`handoff order repeated (${state.forcedOrders - 1} of ${MAX_FORCED_REPEATS}); file not complete: ${check.reason}`);
         const text = nowOrder(visible, config, latest);
-        detach(async () => { await host.clock.sleep?.(DETACH_DELAY_MS); await host.prompt.submit({ text }); });
+        detach(async () => { await pause(host); await host.prompt.submit({ text }); });
       } else {
         state.gaveUp = true;
         await save(host, sessionId, state);
@@ -234,7 +238,7 @@ export async function handoffStep(ctx: StepContext): Promise<void> {
       await log(`handoff order NOW at ~${visible} tokens (limit ${config.handoffForceAt}); expecting ${latest}`);
       const text = nowOrder(visible, config, latest);
       await save(host, sessionId, state);
-      detach(async () => { await host.clock.sleep?.(DETACH_DELAY_MS); await host.prompt.submit({ text }); });
+      detach(async () => { await pause(host); await host.prompt.submit({ text }); });
     }
     return;
   }
@@ -246,7 +250,7 @@ export async function handoffStep(ctx: StepContext): Promise<void> {
     await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}); expecting ${latest}`);
     const text = soonOrder(visible, config, latest);
     await save(host, sessionId, state);
-    detach(async () => { await host.clock.sleep?.(DETACH_DELAY_MS); await host.prompt.submit({ text }); });
+    detach(async () => { await pause(host); await host.prompt.submit({ text }); });
   }
   void changed;
 }

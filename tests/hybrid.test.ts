@@ -89,6 +89,27 @@ describe('hook', () => {
     expect(h.logs.length).toBeGreaterThan(0);
     expect(h.logs.every(l => l.startsWith('[abcdef12] '))).toBe(true);
   });
+  it('session.compact with targetVisibleTokens returns a replacement at or under the target and never calls next', async () => {
+    const target = 6000;
+    const h = harness({ targetVisibleTokens: target, preserveRecentMessages: 2, keepThreshold: 0.5 });
+    const rows: Message[] = [m('user', 'task', { handle: 'u0' })];
+    for (let i = 0; i < 10; i++) {
+      rows.push(m('assistant', '', { handle: `c${i}`, toolUses: [{ tool_use_id: `u${i}`, tool: 'Read', input: { i } }] }));
+      rows.push(m('user', '', { handle: `r${i}`, toolResults: [{ tool_use_id: `u${i}`, text: `row${i} `.repeat(2000) }] }));
+    }
+    rows.push(m('assistant', 'end', { handle: 'a' }), m('user', 'go', { handle: 'u1' }));
+    // every answer keeps its item at the base threshold, so only the target loop can shrink the cut
+    h.$.http.fetch = vi.fn(async (_u: string, init: any) => ({ status: 200, ok: true, text: JSON.stringify({ answers: Object.fromEntries(
+      Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: k.startsWith('call') ? 0.99 : 0.5 + 0.045 * Number(/(\d+)$/.exec(k)?.[1] ?? 1) }])) }) }));
+    expect(estimateSessionTokens(rows)).toBeGreaterThan(target);
+    const next = vi.fn();
+    const out = await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: rows }, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(out.skip).toBeUndefined();
+    expect(estimateSessionTokens(out.messages)).toBeLessThanOrEqual(target);
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(1);
+    expect(h.logs.some(l => l.includes('target fit') && l.includes('reached'))).toBe(true);
+  });
   it('compactAtTokens replaces the percent trigger; percent path when it is 0', async () => {
     const a = harness({ compactAtTokens: 150000 }, 120000); await a.handlers['turn.complete'](a.$, {}, async (e: any) => e);
     expect(a.$.session.compact).not.toHaveBeenCalled();
