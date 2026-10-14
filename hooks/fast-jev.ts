@@ -8,7 +8,8 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-import { applyDecisions, compact, decideCall, messageChars, reductionRatio, resolveOptions } from '../src/compact.js';
+import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
+import { handoffStep, sessionFile, type HandoffHost } from './handoff.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -33,11 +34,19 @@ import type {
 
 const HOOK_DEFAULTS = {
   compactAtPercent: 60,
+  compactAtTokens: 128_000,
+  targetVisibleTokens: 64_000,
+  handoffAt: 250_000,
+  handoffForceAt: 300_000,
+  handoffSkillPath: 'docs/HANDOFF_SKILL.md',
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
   logDecisions: false,
   maxPostCompactTokens: 0,
 };
+
+/** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
+const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 export type HookFetchInit = {
   method?: string;
@@ -57,6 +66,14 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 export type HookConfig = CompactOptions & {
   apiKey?: string;
   compactAtPercent: number;
+  /** 0 = off (percent trigger); otherwise turn.complete compares context.tokens against it. */
+  compactAtTokens: number;
+  /** 0 = no target; otherwise a prune is re-run with a rising keepThreshold until under it. */
+  targetVisibleTokens: number;
+  handoffAt: number;
+  handoffForceAt: number;
+  handoffDir?: string;
+  handoffSkillPath: string;
   minReductionRatio: number;
   model: string;
   logDecisions: boolean;
@@ -68,6 +85,10 @@ class JevRequestError extends Error {}
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
   const value = options[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function positive(value: number, fallback: number): number {
+  return value > 0 ? Math.floor(value) : fallback;
 }
 
 function optionString(options: PluginOptions, key: string): string | undefined {
@@ -93,6 +114,11 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const config: HookConfig = {
     ...numbers,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
+    compactAtTokens: Math.max(0, Math.floor(optionNumber(options, 'compactAtTokens', HOOK_DEFAULTS.compactAtTokens))),
+    targetVisibleTokens: Math.max(0, Math.floor(optionNumber(options, 'targetVisibleTokens', HOOK_DEFAULTS.targetVisibleTokens))),
+    handoffAt: positive(optionNumber(options, 'handoffAt', HOOK_DEFAULTS.handoffAt), HOOK_DEFAULTS.handoffAt),
+    handoffForceAt: positive(optionNumber(options, 'handoffForceAt', HOOK_DEFAULTS.handoffForceAt), HOOK_DEFAULTS.handoffForceAt),
+    handoffSkillPath: optionString(options, 'handoffSkillPath') ?? HOOK_DEFAULTS.handoffSkillPath,
     minReductionRatio: optionNumber(
       options,
       'minReductionRatio',
@@ -104,6 +130,10 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
+  const handoffDir = optionString(options, 'handoffDir');
+  if (handoffDir) config.handoffDir = handoffDir;
+  // The forced limit can never sit under the write limit.
+  if (config.handoffForceAt < config.handoffAt) config.handoffForceAt = config.handoffAt;
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
   return config;
@@ -343,6 +373,7 @@ async function getApiKey(
 }
 
 type LogHost = {
+  session?: { id?: () => Promise<string> };
   ui: { log: (text: string) => void; toast: (text: string, options?: { timeoutMs?: number }) => void };
   env: { get: (name: string) => Promise<string | undefined> };
   fs: {
@@ -371,23 +402,58 @@ async function appendLog($: LogHost, text: string): Promise<void> {
   } catch { /* a log that cannot be written never changes a cut */ }
 }
 
+/** 0.5.0: every log and notify line starts with the first 8 characters of the session id
+ * (`[1ef048ab] ...`), so three sessions' lines in one disk log can be told apart.
+ * No id (a host without `session.id`) leaves the line as it is. */
+async function tag($: { session?: { id?: () => Promise<string> } }, text: string): Promise<string> {
+  try {
+    const id = await $.session?.id?.();
+    if (typeof id === 'string' && id.length > 0) return `[${id.slice(0, 8)}] ${text}`;
+  } catch { /* an id that cannot be read never blocks a line */ }
+  return text;
+}
+
 async function log($: LogHost, text: string): Promise<void> {
-  await appendLog($, text);
-  try { $.ui.log(text); } catch { /* UI failure cannot change compaction. */ }
+  const line = await tag($, text);
+  await appendLog($, line);
+  try { $.ui.log(line); } catch { /* UI failure cannot change compaction. */ }
 }
 
 async function notify($: LogHost, text: string): Promise<void> {
-  await appendLog($, text);
-  try { $.ui.log(text); } catch { /* UI failure cannot change compaction. */ }
-  try { $.ui.toast(text, { timeoutMs: 15_000 }); } catch { /* Disk receipt already written. */ }
+  const line = await tag($, text);
+  await appendLog($, line);
+  try { $.ui.log(line); } catch { /* UI failure cannot change compaction. */ }
+  try { $.ui.toast(line, { timeoutMs: 15_000 }); } catch { /* Disk receipt already written. */ }
 }
 
-function countFallback(
-  $: { ui: { log: (s: string) => void } },
+async function countFallback(
+  $: LogHost,
   counts: Map<string, number>, reason: string, enabled: boolean,
-): void {
+): Promise<void> {
   counts.set(reason, (counts.get(reason) ?? 0) + 1);
-  if (enabled) try { $.ui.log(`fallback counts: ${Array.from(counts, ([r, n]) => `${r}=${n}`).join(' ')}`); } catch { /* diagnostic only */ }
+  if (enabled) try { $.ui.log(await tag($, `skip counts: ${Array.from(counts, ([r, n]) => `${r}=${n}`).join(' ')}`)); } catch { /* diagnostic only */ }
+}
+
+type SkipHost = LogHost & {
+  session?: { id?: () => Promise<string>; usage?: () => Promise<{ context: { tokens?: number } }> };
+};
+
+/** `<handoffDir>/<sessionId>/prune_skipped.json`: { at, reason, tokens, estimate }. Never throws. */
+async function writeSkipMarker($: SkipHost, config: HookConfig, reason: string, estimate: number): Promise<void> {
+  if (!config.handoffDir) return;
+  try {
+    const id = await $.session?.id?.();
+    if (!id) return;
+    let tokens: number | undefined;
+    try { tokens = (await $.session?.usage?.())?.context.tokens; } catch { tokens = undefined; }
+    await $.fs.write(sessionFile(config.handoffDir, id, 'prune_skipped.json'),
+      JSON.stringify({ at: new Date().toISOString(), reason, tokens: tokens ?? null, estimate }));
+  } catch { /* a marker that cannot be written never changes a cut */ }
+}
+
+function resolveSkillPath(cwd: string | undefined, path: string): string {
+  if (/^([a-zA-Z]:[\\/]|[\\/])/.test(path) || !cwd) return path;
+  return `${cwd.replace(/[\\/]+$/, '')}${cwd.includes('\\') && !cwd.includes('/') ? '\\' : '/'}${path.replace(/^[.][\\/]/, '')}`;
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -424,19 +490,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   let supportsCompaction = false;
-  try { on('session.compact', async ($, event, next) => {
+  let lastPostCut: number | undefined;
+  const notBefore = new Map<string, number>();
+  try { on('session.compact', async ($, event, _next) => {
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
-    const fallback = async (code: string, reason: string) => {
-      await notify($, `fallback to built-in summary (${reason})`);
-      countFallback($, fallbackCounts, code, configured.logDecisions);
-      const checkpoint = ledger.checkpoint();
-      const result = await next(event); // keep the original handles for core
-      if (result.skip === undefined) ledger.coreApplied(event.agentId, checkpoint);
-      return result;
-    };
     let prepared: SessionCompaction;
+    let fit: TargetFit | undefined;
     const projection = readPinProvenance(event.messages);
     let input: Message[] = projection;
     try {
@@ -456,15 +517,27 @@ export const register: Register = (on: On, options: PluginOptions) => {
           const response = await $.http.fetch(url, init);
           return { status: response.status, ok: response.ok, text: response.text };
         }, config.apiKey, config.model, async ms => { await $.clock.sleep(ms); });
-      const result = await compact(input, asker, config);
+      const first = await compact(input, asker, config);
       const refreshed = ledger.prepare(projection, event.agentId);
-      result.messages = ledger.restore(refreshed, result.messages);
-      result.stats.messagesBefore = refreshed.length;
-      result.stats.messagesAfter = result.messages.length;
-      result.stats.charsBefore = refreshed.reduce((n, m) => n + messageChars(m), 0);
-      result.stats.charsAfter = result.messages.reduce((n, m) => n + messageChars(m), 0);
-      const pins = new Set<number>();
-      prepared = { result, messages: persistPinProvenance(toSessionMessages(event.messages, result.messages, pins), pins) };
+      const charsBefore = refreshed.reduce((n, m) => n + messageChars(m), 0);
+      // Turns a scored result into the actual replacement: late deliveries restored,
+      // fresh handleless rows, pin provenance row. The target loop measures this.
+      const finalize = (scored: CompactResult): SessionCompaction => {
+        const restored = ledger.restore(refreshed, scored.messages);
+        const pins = new Set<number>();
+        const rows = persistPinProvenance(toSessionMessages(event.messages, restored, pins), pins);
+        return {
+          result: { ...scored, messages: restored, stats: { ...scored.stats, messagesBefore: refreshed.length,
+            messagesAfter: restored.length, charsBefore, charsAfter: rows.reduce((n, m) => n + messageChars(m), 0) } },
+          messages: rows,
+        };
+      };
+      let chosen = first;
+      if (configured.targetVisibleTokens > 0) {
+        fit = fitTarget(input, first, config, configured.targetVisibleTokens, scored => estimateSessionTokens(finalize(scored).messages));
+        chosen = fit.result;
+      }
+      prepared = finalize(chosen);
     } catch (error) {
       await log($, `Jev transcript recovery (${recoveryReason(error)})`);
       // Include deliveries that arrived while a failed request was in flight.
@@ -482,11 +555,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (configured.maxPostCompactTokens > 0 && post > configured.maxPostCompactTokens) {
       await log($, `warn: estimated visible post-cut ~${post} tokens exceeds target ${configured.maxPostCompactTokens}; Jev replacement retained`);
     }
-    if (reductionRatio(result) < configured.minReductionRatio) {
-      return fallback('reduction_ratio', `reduction below ${percent(configured.minReductionRatio)} minimum`);
+    const fitNote = fit
+      ? `; target fit ~${fit.achieved} vs ${configured.targetVisibleTokens} tokens at keepThreshold ${fit.threshold}${fit.floorStage ? ' with lowered reply/injected minimums' : ''}, ${fit.reached ? 'reached' : 'NOT reached (floor above target)'} in ${fit.passes} re-pass(es)`
+      : '';
+    if (fit && !fit.reached) {
+      await log($, `warn: unprunable floor ~${fit.achieved} tokens is above targetVisibleTokens ${configured.targetVisibleTokens}; best cut kept`);
     }
-    await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
+    // 0.5.0: the built-in summary is never requested. A missed ratio leaves the context as it is.
+    if (reductionRatio(result) < configured.minReductionRatio) {
+      const reason = `reduction ${percent(reductionRatio(result))} below ${percent(configured.minReductionRatio)} minimum`;
+      await notify($, `prune skipped (${reason}); context left as it is, built-in summary not requested${fitNote}`);
+      await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
+      await writeSkipMarker($, configured, reason, post);
+      return { skip: `Jev ${reason}; context left as it is, built-in summary not requested` };
+    }
+    await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}${fitNote}; replacement prepared for ${event.trigger})`);
     ledger.rebase(result.messages, event.agentId);
+    if (event.agentId === undefined) lastPostCut = post;
     return { messages };
   }); supportsCompaction = true; } catch {
     // No supported installation surface exists without this event. Never call
@@ -496,23 +581,54 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;
+    let visible: number | undefined;
+    let sid: string | undefined;
     try {
       const { context } = await $.session.usage();
-      if (compacting || (context.percent ?? 0) < configured.compactAtPercent) return next(event);
-      compacting = true;
-      ownsCompaction = true;
-      if (!supportsCompaction) {
-        await notify($, 'Jev cannot install replacement: host has no session.compact event; built-in summary not requested');
-        return next(event);
-      }
-      const outcome = await $.session.compact();
-      if (outcome.skip === undefined && outcome.tokensAfter !== undefined) {
-        await log($, `applied compaction: ${outcome.tokensBefore ?? '?'} -> ${outcome.tokensAfter} tokens (engine measurement)`);
+      try { sid = await ($.session as unknown as { id?: () => Promise<string> }).id?.(); } catch { sid = undefined; }
+      const tokens = context.tokens;
+      visible = tokens;
+      const hold = sid ? notBefore.get(sid) : undefined;
+      // compactAtTokens > 0 compares context.tokens; unset (0) or an unreadable count uses the percent path.
+      const due = configured.compactAtTokens > 0 && tokens !== undefined
+        ? tokens >= configured.compactAtTokens
+        : (context.percent ?? 0) >= configured.compactAtPercent;
+      if (compacting || !due || (hold !== undefined && (tokens ?? 0) < hold)) { /* no prune this turn */ }
+      else {
+        compacting = true;
+        ownsCompaction = true;
+        if (!supportsCompaction) {
+          await notify($, 'Jev cannot install replacement: host has no session.compact event; built-in summary not requested');
+        } else {
+          lastPostCut = undefined;
+          const outcome = await $.session.compact();
+          if (outcome.skip === undefined) {
+            const post = lastPostCut ?? outcome.tokensAfter;
+            if (post !== undefined) { visible = post; if (sid) notBefore.set(sid, post + PRUNE_HYSTERESIS_TOKENS); }
+            if (outcome.tokensAfter !== undefined) {
+              await log($, `applied compaction: ${outcome.tokensBefore ?? '?'} -> ${outcome.tokensAfter} tokens (engine measurement)`);
+            }
+          } else if (sid) notBefore.set(sid, (tokens ?? 0) + PRUNE_HYSTERESIS_TOKENS);
+        }
       }
     } catch (error) {
       await log($, 'auto-compact skipped (engine rejected the request; details omitted)');
     } finally {
       if (ownsCompaction) compacting = false;
+    }
+    // Handoff machine: main loop, not after an interrupt, and only with a handoffDir.
+    if (configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
+      try {
+        const host = $ as unknown as HandoffHost & { session: { id: () => Promise<string>; cwd?: () => Promise<string> } };
+        const cwd = await host.session.cwd?.().catch(() => undefined);
+        await handoffStep({
+          host, sessionId: sid, visible,
+          config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
+            handoffDir: configured.handoffDir, handoffSkillPath: resolveSkillPath(cwd, configured.handoffSkillPath) },
+          log: text => log($, text),
+          detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
+        });
+      } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }
     return next(event);
   });

@@ -294,6 +294,168 @@ function count(decisions: readonly { reason: string }[], reason: string): number
   return decisions.filter((decision) => decision.reason === reason).length;
 }
 
+/** Effective floor of `replyMinChars`: a reply must exceed head + tail + slack to be abridged. */
+const REPLY_FLOOR_CHARS = 1100;
+/** Effective floor of `injectedMinChars`: shorter blocks are never candidates. */
+const INJECTED_FLOOR_CHARS = 200;
+
+export type ReplanOverrides = {
+  keepThreshold: number;
+  replyMinChars?: number;
+  injectedMinChars?: number;
+  /** Probability given to a text block that became eligible only through lowered minimums. */
+  unscoredKeep?: number;
+};
+
+const blockKey = (block: Pick<TextBlock, 'index' | 'start' | 'end' | 'kind'>): string =>
+  `${block.index}:${block.start}:${block.end}:${block.kind}`;
+
+/**
+ * Re-runs the decide and apply steps over the probabilities `compact()` already
+ * cached in `prior` (its decisions carry keepCall/keepResult, its text decisions
+ * carry keep). No Jev request is made. A call or block without a cached answer is
+ * kept as it is, so a recovery result (nothing scored) is never cut harder.
+ * `messages` must be the exact input `compact()` ran over, with the same options.
+ */
+export function replan(
+  messages: readonly Message[],
+  prior: Pick<CompactResult, 'decisions' | 'textDecisions' | 'stats'>,
+  options: CompactOptions,
+  override: ReplanOverrides,
+): CompactResult {
+  const started = Date.now();
+  const original = resolveOptions(options);
+  const resolved: ResolvedCompactOptions = {
+    ...original,
+    keepThreshold: override.keepThreshold,
+    replyMinChars: override.replyMinChars ?? original.replyMinChars,
+    injectedMinChars: override.injectedMinChars ?? original.injectedMinChars,
+  };
+  const calls = collectToolCalls(messages, original.preserveRecentMessages);
+  const cached = new Map(prior.decisions.map(d => [d.id, { keepCall: d.keepCall, keepResult: d.keepResult }]));
+  const decisions: CallDecision[] = calls.map(call => {
+    const answer = cached.get(call.id);
+    if (!answer) {
+      return { id: call.id, tool: call.tool, keepCall: 1, keepResult: 1, action: 'keep',
+        reason: call.pinned ? 'pinned' : 'kept' } as CallDecision;
+    }
+    return decideCall(call, answer, resolved);
+  });
+
+  const origBlocks = collectTextBlocks(messages, original);
+  const answered = new Map<string, TextAnswer>();
+  const knownKeys = new Set<string>();
+  origBlocks.forEach((block, i) => {
+    knownKeys.add(blockKey(block));
+    const d = prior.textDecisions[i];
+    if (d && (d.reason === 'kept' || d.reason === 'abridged' || d.reason === 'removed')) {
+      answered.set(blockKey(block), { keep: d.keep });
+    }
+  });
+  const blocks = collectTextBlocks(messages, resolved);
+  const candidates = new Set(textCandidates(blocks, resolved).map(b => b.id));
+  const textDecisions: TextDecision[] = blocks.map(block => {
+    const key = blockKey(block);
+    let answer = answered.get(key);
+    if (!answer && override.unscoredKeep !== undefined && !knownKeys.has(key) && candidates.has(block.id)) {
+      answer = { keep: override.unscoredKeep };
+    }
+    return decideText(block, answer, resolved);
+  });
+  const kept = applyDecisions(
+    applyTextDecisions(messages, blocks, textDecisions),
+    decisions,
+    calls,
+    resolved.truncateHeadChars,
+  );
+  return {
+    messages: kept,
+    decisions,
+    textDecisions,
+    stats: {
+      ...prior.stats,
+      messagesAfter: kept.length,
+      charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
+      calls: calls.length,
+      kept: count(decisions, 'kept'),
+      resultsDropped: count(decisions, 'result_dropped'),
+      callsDropped: count(decisions, 'call_dropped'),
+      pinned: count(decisions, 'pinned'),
+      texts: blocks.length,
+      textsRemoved: count(textDecisions, 'removed'),
+      duplicatesRemoved: count(textDecisions, 'duplicate'),
+      repliesAbridged: count(textDecisions, 'abridged'),
+      ms: prior.stats.ms + (Date.now() - started),
+    },
+  };
+}
+
+export type TargetFit = {
+  result: CompactResult;
+  /** keepThreshold of the returned result. */
+  threshold: number;
+  /** Estimated size of the returned result, as `estimate` measured it. */
+  achieved: number;
+  reached: boolean;
+  /** True when replyMinChars and injectedMinChars were lowered to get there (or to try). */
+  floorStage: boolean;
+  passes: number;
+};
+
+/** Thresholds above `base`: steps of 0.05 up to 1, then one just past 1 (only probability 1.0 survives). */
+export function thresholdLadder(base: number): number[] {
+  const out: number[] = [];
+  for (let k = 1; ; k++) {
+    const t = Math.round((base + 0.05 * k) * 100) / 100;
+    if (t > 1) break;
+    out.push(t);
+  }
+  out.push(1.0001);
+  return out;
+}
+
+/**
+ * Aims `first` (the Jev pass at the configured keepThreshold) at a real post-cut
+ * size: raises keepThreshold over the cached probabilities until `estimate` is at
+ * or under `target` or the threshold has passed 1; if the unprunable floor is still
+ * above the target, lowers replyMinChars and injectedMinChars once (blocks that
+ * became eligible are abridged or removed unscored) and sweeps again. No Jev request.
+ * Returns the best result reached; `reached` says whether the target was met.
+ */
+export function fitTarget(
+  messages: readonly Message[],
+  first: CompactResult,
+  options: CompactOptions,
+  target: number,
+  estimate: (result: CompactResult) => number,
+): TargetFit {
+  const original = resolveOptions(options);
+  let passes = 0;
+  const firstSize = estimate(first);
+  const done = (result: CompactResult, threshold: number, achieved: number, floorStage: boolean): TargetFit =>
+    ({ result, threshold, achieved, reached: achieved <= target, floorStage, passes });
+  if (firstSize <= target || (first.decisions.length === 0 && first.textDecisions.length === 0)) {
+    return done(first, original.keepThreshold, firstSize, false);
+  }
+  let last = { result: first, threshold: original.keepThreshold, size: firstSize };
+  const sweep = (extra: Partial<ReplanOverrides>): typeof last | undefined => {
+    for (const threshold of thresholdLadder(original.keepThreshold)) {
+      const result = replan(messages, first, options, { keepThreshold: threshold, ...extra });
+      passes++;
+      last = { result, threshold, size: estimate(result) };
+      if (last.size <= target) return last;
+    }
+    return undefined;
+  };
+  const hit = sweep({});
+  if (hit) return done(hit.result, hit.threshold, hit.size, false);
+  const reply = original.replyMinChars > 0 ? Math.max(REPLY_FLOOR_CHARS, Math.floor(original.replyMinChars / 2)) : 0;
+  const injected = original.injectedMinChars > 0 ? Math.max(INJECTED_FLOOR_CHARS, Math.floor(original.injectedMinChars / 2)) : 0;
+  const floorHit = sweep({ replyMinChars: reply, injectedMinChars: injected, unscoredKeep: 0 });
+  const best = floorHit ?? last;
+  return done(best.result, best.threshold, best.size, true);
+}
+
 /**
  * Compacts a transcript by asking Jev, for every tool call outside the pinned
  * first and newest messages, whether the call and whether its result must

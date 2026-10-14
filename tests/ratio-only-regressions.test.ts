@@ -142,6 +142,6 @@ it('044 host_without_event_never_calls_builtin_compactor', async () => {
   expect(h.disk()).toContain('host has no session.compact event');
 });
 it('044 reduction_ratio_is_the_only_core_fallback', async () => {
-  const h = harness({ minReductionRatio: 1 }); await h.cut();
-  expect(h.core).toHaveBeenCalledTimes(1); expect(h.disk()).toContain('reduction below 100% minimum');
+  const h = harness({ minReductionRatio: 1 }); const out = await h.cut();
+  expect(h.core).not.toHaveBeenCalled(); expect(out.skip).toBeDefined(); expect(h.disk()).toContain('below 100% minimum');
 });

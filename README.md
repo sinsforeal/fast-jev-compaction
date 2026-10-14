@@ -123,6 +123,31 @@ put it in a source file.
 | `maxPostCompactTokens` | `0` | Hook only: warn above estimated visible size; never triggers summary; 0 disables warning |
 | `logDecisions` | `false` | Hook only: opt-in kept/dropped probabilities and text decisions |
 
+### 0.5.0 plugin options (read in `register`, from `pluginConfigs`)
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `compactAtTokens` | `128000` | turn.complete requests a prune when `context.tokens` >= this. When it is above 0 it replaces `compactAtPercent`; set `0` to use the percent trigger (also used when the token count is unreadable) |
+| `compactAtPercent` | `60` | legacy trigger, percent of the model window; ignored while `compactAtTokens` > 0 |
+| `targetVisibleTokens` | `64000` | real post-cut target: after the first Jev pass the plugin raises `keepThreshold` over the cached probabilities (steps of 0.05, then once past 1; no new Jev request) until `estimateSessionTokens` is at or under it. If the floor (pins, user prompts, short replies) is still above it, `replyMinChars` and `injectedMinChars` are halved once (floors 1100 / 200; newly eligible blocks are abridged or removed unscored) and the sweep repeats. The log line reports achieved size, threshold, floor stage. 0 disables |
+| `maxPostCompactTokens` | `0` | legacy: only a warning above this estimate. Independent of the target |
+| `handoffAt` | `250000` | visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |
+| `handoffForceAt` | `300000` | visible size at which HANDOFF NOW is ordered (raised to `handoffAt` if lower) |
+| `handoffDir` | unset | absolute path; the session's files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`); `<handoffDir>/current_session.json` follows the id. Unset = the handoff machine is off |
+| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | path cited in the orders; relative paths resolve against the session cwd |
+
+The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, leaves the context as it is and writes `prune_skipped.json`; `compactTranscript` stays the offline recovery on transport failure. Every log line starts with `[first 8 chars of the session id]`.
+
+Handoff flow (needs `DISABLE_AUTO_COMPACT=1` on the launcher; harness side):
+1. After each main-loop turn, visible = post-cut estimate if a prune ran, else `context.tokens`.
+2. At `handoffAt` the plugin submits HANDOFF SOON (once per 50000 more tokens); at `handoffForceAt` HANDOFF NOW.
+3. The model writes `<handoffDir>/<sessionId>/latest.md`, header naming the session id, last line `COMPLETE`.
+4. On a later turn the plugin accepts it only if it is newer than the order, names this session and ends in COMPLETE.
+5. It writes `resumed.json` { by, file, mtime (ms), at }, then runs `/clear` (after checking `$.command.list()` has it).
+6. It reads `$.session.id()` again; if changed it copies latest.md and resumed.json to the new id's folder; either way it writes `current_session.json`.
+7. It submits HANDOFF RESUME naming latest.md and the skill's Resume section.
+8. Not complete after NOW: the order repeats once per turn, 3 repeats at most, then "handoff not written" is logged and pruning goes on. Never a clear without a complete file.
+
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
 stage was needed, and the number of requests.

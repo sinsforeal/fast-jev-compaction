@@ -45,8 +45,9 @@ it('041: an exceeded token target warns and keeps Jev at every positive value', 
 });
 it('044: no reduction is the allowed built-in fallback', async () => {
   const h = harness({ minReductionRatio: 1 }); h.setRows([m('user', 'task'), m('assistant', 'fact')]);
-  await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
-  expect(h.logs.join(' ')).toContain('reduction below 100% minimum');
+  const out = await h.cut(); expect(h.core).not.toHaveBeenCalled();
+  expect(out.skip).toContain('built-in summary not requested');
+  expect(h.logs.join(' ')).toContain('below 100% minimum');
 });
 it('041: accepted mid-turn prompt omitted by projection is pinned in chronological order', async () => {
   const h = harness(); h.setRows(history().slice(0, 3));
