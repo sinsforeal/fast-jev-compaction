@@ -56,6 +56,12 @@ export const DETACH_DELAY_MS = 250;
 
 export const stateKey = (sessionId: string): string => `handoff:${sessionId}`;
 
+/** A relative path joins the session working directory; an absolute path, or no cwd, stays as given. */
+export function resolveAgainstCwd(cwd: string | undefined, path: string): string {
+  if (/^([a-zA-Z]:[\\/]|[\\/])/.test(path) || !cwd) return path;
+  return `${cwd.replace(/[\\/]+$/, '')}${cwd.includes('\\') && !cwd.includes('/') ? '\\' : '/'}${path.replace(/^[.][\\/]/, '')}`;
+}
+
 /** `<handoffDir>/<sessionId>/<name>`, with the separator the configured directory uses. */
 export function sessionFile(dir: string, sessionId: string, name: string): string {
   const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';

@@ -34,6 +34,14 @@ Docs done. Found on arrival: CHANGELOG 0.5.0 entry, README options/handoff/insta
 
 Gotchas: node_modules installed with npm ci in the worktree (gitignored). The turn.complete handler needs $.session.id; hosts without it get no prefix and no handoff step.
 
+## Stage at 19:22 (0.5.3, per-tree handoffDir)
+
+- The User's rule, one writer per store: `handoffDir` relative resolves against `$.session.cwd()`; absolute stays. Default `var/handoffs` (HOOK_DEFAULTS, plugin.json), so the machine's dir is always set now (it still runs only in a hybrid session).
+- Helper `resolveAgainstCwd(cwd, path)` in hooks/handoff.ts (the old `resolveSkillPath` body, now also used for the skill path). fast-jev.ts: `resolvedHandoffDir`/`resolvedCwd` for the skip marker; the handoff step gets the resolved dir. handoff.ts itself builds paths only from the config it is given (already resolved), so current_session.json, latest.md and resumed.json follow.
+- Tests: three cases in tests/hybrid.test.ts (relative, default, absolute); tests/hook.test.ts defaults fixture gained handoffDir. The harness `session.cwd` throws when no cwd is given, which covers the no-cwd fallback (path stays relative).
+- `claude plugin validate` skipped: the agent_boundary hook blocks it from an agent.
+- First attempt at the version bump used sed on relative paths and was blocked by agent_boundary (cwd not the worktree); redone with Edit on absolute paths.
+
 ## Stage at 19:03 (0.5.2, Ryan v2)
 
 - The User 18:59: with Jev unavailable a hybrid session never cuts blind; `session.compact` skips with `prune_skipped.json` (reason `Jev unavailable (...)`) and counts `jev_unavailable`; the handoff takes over at handoffAt/handoffForceAt. Non-hybrid sessions keep the 0.4.4 transcript recovery cut.

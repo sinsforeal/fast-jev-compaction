@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
-import { handoffStep, sessionFile, type HandoffHost } from './handoff.js';
+import { handoffStep, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -39,6 +39,7 @@ const HOOK_DEFAULTS = {
   handoffAt: 250_000,
   handoffForceAt: 300_000,
   handoffSkillPath: 'docs/HANDOFF_SKILL.md',
+  handoffDir: 'var/handoffs',
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
   logDecisions: false,
@@ -142,8 +143,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
-  const handoffDir = optionString(options, 'handoffDir');
-  if (handoffDir) config.handoffDir = handoffDir;
+  config.handoffDir = optionString(options, 'handoffDir') ?? HOOK_DEFAULTS.handoffDir;
   // The forced limit can never sit under the write limit.
   if (config.handoffForceAt < config.handoffAt) config.handoffForceAt = config.handoffAt;
   const goal = optionString(options, 'goal');
@@ -447,7 +447,7 @@ async function countFallback(
 }
 
 type SkipHost = LogHost & {
-  session: { id: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number } }> };
+  session: { id: () => Promise<string>; cwd: () => Promise<string>; usage: () => Promise<{ context: { tokens?: number } }> };
 };
 
 /** `<handoffDir>/<sessionId>/prune_skipped.json`: { at, reason, tokens, estimate }. Never throws. */
@@ -458,14 +458,18 @@ async function writeSkipMarker($: SkipHost, config: HookConfig, reason: string, 
     if (!id) return;
     let tokens: number | undefined;
     try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
-    await $.fs.write(sessionFile(config.handoffDir, id, 'prune_skipped.json'),
+    await $.fs.write(sessionFile(await resolvedHandoffDir($, config.handoffDir), id, 'prune_skipped.json'),
       JSON.stringify({ at: new Date().toISOString(), reason, tokens: tokens ?? null, estimate }));
   } catch { /* a marker that cannot be written never changes a cut */ }
 }
 
-function resolveSkillPath(cwd: string | undefined, path: string): string {
-  if (/^([a-zA-Z]:[\\/]|[\\/])/.test(path) || !cwd) return path;
-  return `${cwd.replace(/[\\/]+$/, '')}${cwd.includes('\\') && !cwd.includes('/') ? '\\' : '/'}${path.replace(/^[.][\\/]/, '')}`;
+/** The one place the handoffDir option becomes a path: relative = per tree (session cwd), absolute = shared. */
+async function resolvedHandoffDir($: { session: { cwd: () => Promise<string> } }, dir: string): Promise<string> {
+  return resolveAgainstCwd(await resolvedCwd($), dir);
+}
+
+async function resolvedCwd($: { session: { cwd: () => Promise<string> } }): Promise<string | undefined> {
+  try { return await $.session.cwd(); } catch { return undefined; }
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -651,12 +655,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Handoff machine: hybrid session, main loop, not after an interrupt, and only with a handoffDir.
     if (hybrid && configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
       try {
-        let cwd: string | undefined;
-        try { cwd = await $.session.cwd(); } catch { cwd = undefined; }
+        const cwd = await resolvedCwd($);
         await handoffStep($ as unknown as HandoffHost, {
           sessionId: sid, visible,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
-            handoffDir: configured.handoffDir, handoffSkillPath: resolveSkillPath(cwd, configured.handoffSkillPath) },
+            handoffDir: resolveAgainstCwd(cwd, configured.handoffDir), handoffSkillPath: resolveAgainstCwd(cwd, configured.handoffSkillPath) },
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
         });

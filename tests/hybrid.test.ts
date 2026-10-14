@@ -63,7 +63,7 @@ describe('options', () => {
 
 // ---- hook: skip path, log prefix, trigger precedence --------------------------
 const SID = 'abcdef12-0000-4000-8000-000000000000';
-function harness(options = {}, tokens: number | undefined = 200000, hybrid = true) {
+function harness(options = {}, tokens: number | undefined = 200000, hybrid = true, cwd?: string) {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, ...options });
   const files = new Map<string, string>(); const logs: string[] = [];
@@ -72,9 +72,27 @@ function harness(options = {}, tokens: number | undefined = 200000, hybrid = tru
     fs: { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '', write: async (p: string, t: string) => { files.set(p, t); } },
     http: { fetch: vi.fn(async (_u: string, init: any) => ({ status: 200, ok: true, text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 1 }])) }) })) },
     clock: { sleep: async () => {}, now: async () => 1000 }, ui: { log: (s: string) => logs.push(s), toast: vi.fn() },
-    session: { id: async () => SID, usage: vi.fn(async () => ({ context: { tokens, percent: 1 } })), messages: async () => rows, compact: vi.fn(async () => ({ messages: [] })) } };
+    session: { id: async () => SID, cwd: async () => { if (cwd === undefined) throw new Error('no cwd'); return cwd; }, usage: vi.fn(async () => ({ context: { tokens, percent: 1 } })), messages: async () => rows, compact: vi.fn(async () => ({ messages: [] })) } };
   return { handlers, files, logs, $, rows };
 }
+describe('handoffDir resolution', () => {
+  it('a relative handoffDir lands under the session cwd (per tree)', async () => {
+    const h = harness({ minReductionRatio: 1, handoffDir: 'var/handoffs' }, 200000, true, 'F:/tree_a');
+    await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
+    expect([...h.files.keys()]).toContain(`F:/tree_a/var/handoffs/${SID}/prune_skipped.json`);
+  });
+  it('the default handoffDir is var/handoffs, per tree', async () => {
+    const h = harness({ minReductionRatio: 1 }, 200000, true, 'F:/tree_b');
+    await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
+    expect([...h.files.keys()]).toContain(`F:/tree_b/var/handoffs/${SID}/prune_skipped.json`);
+  });
+  it('an absolute handoffDir stays as given whatever the cwd', async () => {
+    const h = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs' }, 200000, true, 'F:/tree_a');
+    await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
+    expect([...h.files.keys()]).toContain(`F:/handoffs/${SID}/prune_skipped.json`);
+    expect([...h.files.keys()].some(k => k.startsWith('F:/tree_a'))).toBe(false);
+  });
+});
 describe('hook', () => {
   it('a ratio miss returns skip, writes prune_skipped.json, never calls next, prefixes the log', async () => {
     const h = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs' });

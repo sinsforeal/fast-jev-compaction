@@ -133,7 +133,7 @@ put it in a source file.
 | `maxPostCompactTokens` | `0` | legacy: only a warning above this estimate. Independent of the target |
 | `handoffAt` | `250000` | visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |
 | `handoffForceAt` | `300000` | visible size at which HANDOFF NOW is ordered (raised to `handoffAt` if lower) |
-| `handoffDir` | unset | absolute path; the session's files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`); `<handoffDir>/current_session.json` follows the id. Unset = the handoff machine is off |
+| `handoffDir` | `var/handoffs` | the session's files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`); `<handoffDir>/current_session.json` follows the id. A relative dir resolves against the session cwd, so each tree keeps its own store (per tree); an absolute dir is one store shared by every session |
 | `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | path cited in the orders; relative paths resolve against the session cwd |
 
 The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, leaves the context as it is and writes `prune_skipped.json`; `compactTranscript` stays the offline recovery on transport failure. Every log line starts with `[first 8 chars of the session id]`.

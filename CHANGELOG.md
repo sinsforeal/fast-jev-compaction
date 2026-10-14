@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.3 - 2026-10-14
+- `handoffDir` resolves against the session working directory when relative (same rule as `handoffSkillPath`), through one helper, `resolveAgainstCwd`; an absolute value is used as given. Default is now `var/handoffs`, so each tree keeps its own store (one writer per store). Applies to the skip marker, the handoff step, `current_session.json` and the resumed/latest files.
+
 ## 0.5.2 - 2026-10-14
 - Jev unavailable (transport or key failure): a hybrid session no longer cuts blind through the transcript recovery path; it skips, writes `prune_skipped.json` with the reason, counts `jev_unavailable`, and the handoff machine takes over at `handoffAt` and `handoffForceAt` (the User, 18:59). Other sessions keep the 0.4.4 recovery cut.
 

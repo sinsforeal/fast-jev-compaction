@@ -54,7 +54,7 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     // 0.4.1 brief: size is measurement only; zero disables its warning threshold.
-    const D = { compactAtTokens: 160000, targetVisibleTokens: 64000, handoffAt: 250000, handoffForceAt: 300000, handoffSkillPath: 'docs/HANDOFF_SKILL.md' };
+    const D = { compactAtTokens: 160000, targetVisibleTokens: 64000, handoffAt: 250000, handoffForceAt: 300000, handoffSkillPath: 'docs/HANDOFF_SKILL.md', handoffDir: 'var/handoffs' };
     expect(resolveHookConfig({})).toEqual({ ...D, compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', logDecisions: false, maxPostCompactTokens: 0 });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
