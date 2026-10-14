@@ -1,3 +1,5 @@
+READY: a53799ce321b7ff2085bcc28350a23c7b5ce82dd
+
 # Jev 0.4.1 fidelity notebook, 2026-10-14
 
 Branch `fidelity/jev-041-20261014`, worktree `tmp/wt_jev_041_20261014`.
@@ -10,13 +12,15 @@ Write connector tested offline; content uses patch editor, no shell heredoc.
 
 ## Current stage
 
-Implementation and 100 tests green; typecheck/build green. Version/docs updated to 0.4.1.
-Before evidence: initial nine new tests fail by assertion on clean 4cc723a.
-All 29 expanded fidelity gates fail on pinned 4cc723a; final 30-gate receipt
-follows. Actual 2.1.299 manifest/hook scanner passes in isolated config.
-Implementation commits b75d344, 6a4833c and LF correction 6887253 pushed.
-Independent reviewer accepted the final merged-provenance correction and ran
-30/30 fidelity gates; final receipts and trading report publication follow.
+Code READY and remote-verified at a53799ce321b7ff2085bcc28350a23c7b5ce82dd,
+on origin/fix/our-use-20261014. Full suite 100/100; library/hook typechecks,
+build and actual 2.1.299 manifest/hook scanner pass. All 30 identical new fidelity
+tests fail on pinned 4cc723a, without missing imports. Independent reviewer
+accepted final code and ran 30/30 fidelity gates, plus earlier 95/95 and 99/99
+full suites. Final code receipt: tmp/041-release-receipt.json.
+Fork default branch, installed plugin, user settings and 0.7 trial untouched.
+Trading report publication is the current stage; installation and live acceptance
+remain in the existing coordinator/Ryan release queue 0f83ff731638.
 
 ## Findings, attempts and failures
 
@@ -60,12 +64,32 @@ fixture. API recovery removes only exact provenance metadata already verified in
 the original projection, so the metadata never becomes a new hidden delivery.
 100/100 full-suite gates pass; original instructions and one provenance row remain.
 Outcome estimate includes the provenance row, matching the warning measurement.
+Isolated marketplace QA: GitHub source accepts `ref: fix/our-use-20261014`.
+Fresh update without registration failed not_found; full git-URL source mismatched
+the declared GitHub source. The branch-qualified GitHub shorthand
+`sinsforeal/fast-jev-compaction#fix/our-use-20261014` added successfully, then
+update succeeded; known source retained the ref and catalog manifest is 0.4.1.
+This proves release instructions without default promotion or user installation.
 
 ## Scratch and stop plan
 
-Keep ignored tmp/ host-inspection sources/receipts, gate logs, node_modules and
-dist for coordinator review/release. No API request, raw transcript copy, watcher
-or background job. If interrupted: explicit-path commit finished changes, push
-HEAD to origin/fix/our-use-20261014, update this notebook and trading notebook;
-coordinator resumes final gates and the existing release queue 0f83ff731638.
-Never promote the default branch or install from this agent session.
+Keep ignored tmp/ host-inspection sources/receipts, baseline worktree, isolated
+scanner/ref QA and gate logs (2,209,486 bytes at receipt), node_modules
+(64,210,287 bytes) and dist (112,715 bytes): about 66.5 MB for offline review and
+release reproduction. No raw transcript copy, watcher or background job remains.
+If interrupted during docs publication: explicit-path commit and push the named
+trading docs branch; coordinator lands it and resumes release queue 0f83ff731638.
+Do not promote the default branch or install from this agent session.
+
+## Closing receipt
+
+Six fidelity brief requirements closed, no new queue item. All review findings
+closed with code/gates. Existing release item owns MAIN visibility, source/install
+switch, three pinned reloads and next-day acceptance. No restart performed.
+Estimate 90 to 120 minutes; code/review/gates completed in about 35 minutes,
+overall actual is recorded in the trading notebook. Model Codex GPT-6 (sol route
+requested). Jev falls back only on: request failure after retry policy, invalid
+engine result, missing compaction event, or a demonstrated per-cut reconstruction
+failure allowed by brief 2.
+
+closed 6, opened 0

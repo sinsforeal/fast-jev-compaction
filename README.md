@@ -200,7 +200,7 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add sinsforeal/fast-jev-compaction
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fix/our-use-20261014'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -211,6 +211,12 @@ auto-compaction) goes through Jev: the toast reads
 `fast-jev-compaction: kept N/M messages, no summary (…; replacement prepared …)`
 when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
 cannot safely supply a replacement for one of the fidelity reasons above.
+
+The branch-qualified source above installs 0.4.1 without promoting the fork's
+default branch. For an existing declared source, preserve unrelated fields and
+set its GitHub `repo` to `sinsforeal/fast-jev-compaction` and `ref` to
+`fix/our-use-20261014` before the add/update commands. Confirm both marketplace
+and cached plugin manifests say 0.4.1 before reloading. The 0.7 trial is unchanged.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

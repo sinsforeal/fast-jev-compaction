@@ -35,7 +35,7 @@ hooks surface before installing or loading it:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export TYPESAFE_API_KEY="<your TypeSafe key>"
 
-claude plugin marketplace add sinsforeal/fast-jev-compaction
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fix/our-use-20261014'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
