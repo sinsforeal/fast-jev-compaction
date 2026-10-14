@@ -13,6 +13,8 @@ Source for every change below: Ryan v2's **Jev fork 0.4.1 fidelity brief**, writ
   deliveries verbatim. Observe all append UUIDs for chronology, correlate queued
   deliveries with provisional submissions, and restore arrivals during scoring.
   Track pinned identities across cuts; repeated equal instructions remain distinct.
+  One separate fingerprint/occurrence provenance row survives plugin reload and
+  resume while each original instruction row remains verbatim.
 - Brief 3: first startup/resume cut uses Jev's handleless rebuild. Recover known
   historical hidden text through 2.1.299's bounded API-tail view, aligned to visible
   text/tool anchors. Never substitute the bounded tail for the older history.

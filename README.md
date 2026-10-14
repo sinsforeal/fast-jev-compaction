@@ -159,6 +159,9 @@ hidden rendered deliveries and subagent compactions. Accepted prompt text and
 context, and queued attachments rendered as text, stay verbatim and unscored at
 their observed chronological positions. Deliveries arriving during scoring are
 inserted before returning the replacement. Rows get fresh host IDs and parents.
+One separate provenance row records fingerprints and occurrence numbers of pinned
+rows, so reload/resume preserves their pin status without changing instruction
+text or writing a shared store. It is replaced, rather than multiplied, per cut.
 `maxPostCompactTokens` (default 0) and `minReductionRatio` only report warnings;
 neither can request a summary at any configured value.
 

@@ -96,6 +96,8 @@ replaces the older projected prefix. Child attachments rendered as text are
 passed verbatim and unscored. An opaque block the host cannot rebuild triggers
 only that cut's logged exception. New arrivals during scoring are restored before
 returning history. No persistent shared store is written. Jev replacements rebuild
+pin provenance as one separate metadata row for the next reload/resume; original
+instruction rows remain verbatim. Replacements rebuild
 every row without a handle and combine parallel siblings and pure result rows.
 An empty projected result still gets the existing non-text marker.
 

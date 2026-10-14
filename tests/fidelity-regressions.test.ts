@@ -233,3 +233,42 @@ it('041: proven opaque legacy API content logs only that cut reason', async () =
   h.$.session.messages = async () => history(); await h.cut();
   expect(h.core).toHaveBeenCalledTimes(1); expect(h.fetch).toHaveBeenCalled();
 });
+
+it('041: fully visible equal prompts merged by the API never trigger a hidden-text fallback', async () => {
+  const h = harness(); const rows = [m('user', 'same'), m('user', 'same'), m('assistant', 'unique fact')]; h.setRows(rows);
+  h.$.session.messages = async (args?: any) => args?.as === 'api' ? [
+    { role: 'user', content: [{ type: 'text', text: 'samesame' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'unique fact' }] },
+  ] as any : rows;
+  const out = await h.cut(); expect(h.core).not.toHaveBeenCalled();
+  expect(out.messages.filter(m => m.text === 'same')).toHaveLength(2);
+});
+it('041: bounded hidden tail quoting an older prompt stays whole immediately before its tail anchor', async () => {
+  const h = harness(); const rows = [m('user', 'task'), m('assistant', 'old fact'), m('assistant', 'tail fact')]; h.setRows(rows);
+  h.$.session.messages = async (args?: any) => args?.as === 'api' ? [
+    { role: 'user', content: [{ type: 'text', text: 'hidden delivery quotes task' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'tail fact' }] },
+  ] as any : rows;
+  const out = await h.cut(); expect(h.core).not.toHaveBeenCalled();
+  expect(out.messages[0].text).toBe('task'); expect(out.messages[1].text).toBe('old fact');
+  expect(out.messages[2].text).toBe('hidden delivery quotes task'); expect(out.messages[3].text).toBe('tail fact');
+});
+it('041: recovered delivery stays pinned after a new registration and four resume rounds', async () => {
+  const hidden = '<system-reminder>' + 'durable exact instruction '.repeat(120) + '</system-reminder>';
+  const initial = harness(); initial.$.session.messages = async (args?: any) => args?.as === 'api' ? apiHistory(hidden) as any : history();
+  let rows = (await initial.cut()).messages;
+  for (let i = 0; i < 4; i++) {
+    const resumed = harness(); resumed.setRows(rows);
+    resumed.$.session.messages = async (args?: any) => args?.as === 'api' ? rows.map(m => ({ role: m.role, content: [{ type: 'text', text: m.text }] })) as any : rows;
+    rows = (await resumed.cut()).messages;
+    expect(resumed.core).not.toHaveBeenCalled(); expect(rows.filter(m => m.text === hidden)).toHaveLength(1);
+    expect(rows.filter(m => m.text.startsWith('[fast-jev-compaction pinned delivery provenance'))).toHaveLength(1);
+    expect(rows.every(m => !m.handle)).toBe(true);
+  }
+});
+it('041: additional hidden API text without a chronology anchor uses a specific one-cut exception', async () => {
+  const h = harness(); h.setRows([m('user', 'task')]);
+  h.$.session.messages = async (args?: any) => args?.as === 'api' ? [{ role: 'user', content: [{ type: 'text', text: 'task hidden extra' }] }] as any : [m('user', 'task')];
+  await h.cut(); expect(h.logs.some(s => s.includes('API hidden-text chronology has no observable anchor'))).toBe(true);
+  h.$.session.messages = async () => [m('user', 'task')]; await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
+});

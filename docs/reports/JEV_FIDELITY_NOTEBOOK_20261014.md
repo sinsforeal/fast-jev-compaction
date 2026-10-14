@@ -10,9 +10,11 @@ Write connector tested offline; content uses patch editor, no shell heredoc.
 
 ## Current stage
 
-Implementation and 95 tests green; typecheck green. Version/docs updated to 0.4.1.
+Implementation and 99 tests green; typecheck/build green. Version/docs updated to 0.4.1.
 Before evidence: initial nine new tests fail by assertion on clean 4cc723a.
-Full pinned-before receipt, final build/scanner and independent re-review follow.
+All 25 initial expanded fidelity gates fail on pinned 4cc723a; final 29-gate
+receipt follows. Actual 2.1.299 manifest/hook scanner passes in isolated config.
+First implementation committed/pushed at b75d344; independent re-review in progress.
 
 ## Findings, attempts and failures
 
@@ -40,6 +42,17 @@ that handleless schema: explicit per-cut fallback logs this demonstrated reason,
 then clears only rows covered by a successful core cut; skipped/failed core cuts
 retain them and newer arrivals survive the checkpoint. This is the brief 2
 exception, not a standing startup/resume/subagent flag.
+
+Review found three further cases: equal visible prompts merged by the API falsely
+refused; API-tail text quoting an older prompt lost chronology; recovered pins
+lost status after a new plugin registration. Added exact/adjacent API anchors,
+consumed-visible-text gates and a separate fingerprint/occurrence provenance row.
+Four fresh-registration resume rounds retain exact instructions and one metadata
+row, with no handles. A missing API chronology anchor now logs only that cut's
+specific exception. The host scanner first rejected a nested counter helper that
+received `$`; moved it to a declared top-level helper, scanner now green.
+The baseline junction attempt required an absolute target; no junction was made,
+and baseline tests resolved the parent worktree dependencies successfully.
 
 ## Scratch and stop plan
 

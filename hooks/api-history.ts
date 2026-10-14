@@ -1,5 +1,6 @@
 import type { SessionMessage } from 'claude-code';
 import { FidelityError, type FidelityLedger } from './fidelity.js';
+import { isPinProvenance } from './pin-provenance.js';
 
 /** Supplemental 2.1.299 contract: W2o/IXt expose a bounded API tail for the
  * requested loop, including rendered attachments omitted by kpe/bpe.rowsOf.
@@ -27,7 +28,9 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
       return index === undefined ? [] : [index];
     });
     if (ids.length) return [...new Set(ids)].sort((a, b) => a - b);
-    const candidates = projected.flatMap((p, i) => p.role === m.role && p.text !== '' && text[j]!.includes(p.text) ? [i] : []);
+    // Assistant exact text is a reliable anchor. User text quoted inside an
+    // attachment is not evidence that the older prompt belongs to this API tail.
+    const candidates = projected.flatMap((p, i) => m.role === 'assistant' && p.role === m.role && p.text !== '' && text[j] === p.text ? [i] : []);
     return candidates.length === 1 ? candidates : [];
   });
   const claimed = new Set<number>();
@@ -39,14 +42,26 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
       throw new FidelityError('API history contains opaque user blocks unsupported by handleless SessionMessage');
     }
     if (!text[j]) continue;
+    if (isPinProvenance(text[j]!)) continue;
     const prior = anchors.slice(0, j).flat().at(-1);
     const following = anchors.slice(j + 1).flat()[0];
-    const low = prior === undefined ? 0 : prior + 1;
+    let low = prior === undefined ? 0 : prior + 1;
     const high = following === undefined ? projected.length : following;
+    if (prior === undefined && following !== undefined && !anchors[j]!.length) {
+      // Only the contiguous user group immediately preceding the first known
+      // tail anchor can share its API row. Retain any earlier prefix unchanged.
+      low = following;
+      while (low > 0 && projected[low - 1]!.role === 'user') low--;
+    }
     const matches = projected.flatMap((p, i) => i >= low && i < high && p.role === 'user' && p.text && text[j]!.includes(p.text) ? [i] : []);
+    if (prior === undefined && following === undefined && !anchors[j]!.length &&
+      matches.map(i => projected[i]!.text).join('') !== text[j]) {
+      throw new FidelityError('API hidden-text chronology has no observable anchor');
+    }
     // Multiple occurrences of the same short prompt cannot establish position
     // unless the API's neighbouring tool/text anchors disambiguate them.
     if (matches.some((i, k) => matches.slice(0, k).some(n => projected[n]!.text === projected[i]!.text))) {
+      if (matches.map(i => projected[i]!.text).join('') === text[j]) continue;
       if (matches.every(i => projected[i]!.text === text[j])) continue; // no observable extra content
       throw new FidelityError('API hidden-text chronology ambiguous between repeated projected prompts');
     }

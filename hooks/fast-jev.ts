@@ -13,6 +13,7 @@ import { estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger, FidelityError } from './fidelity.js';
 import { recoverApiHistory, type RuntimeMessages } from './api-history.js';
+import { readPinProvenance, persistPinProvenance } from './pin-provenance.js';
 import {
   buildJevRequest,
   DEFAULT_MODEL,
@@ -176,6 +177,7 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
 export function toSessionMessages(
   input: readonly SessionMessage[],
   output: readonly Message[],
+  pinned?: Set<number>,
 ): SessionMessage[] {
   const rebuiltMessages: SessionMessage[] = [];
   for (const message of output) {
@@ -202,6 +204,7 @@ export function toSessionMessages(
       last.toolUses.push(...rebuilt.toolUses);
       if (rebuilt.toolResults?.length) last.toolResults = [...(last.toolResults ?? []), ...rebuilt.toolResults];
     } else rebuiltMessages.push(rebuilt);
+    if (message.pinned && message.role === 'user') pinned?.add(rebuiltMessages.length - 1);
   }
   return rebuiltMessages;
 }
@@ -324,15 +327,19 @@ function notify(
   $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
+function countFallback(
+  $: { ui: { log: (s: string) => void } },
+  counts: Map<string, number>, reason: string, enabled: boolean,
+): void {
+  counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  if (enabled) $.ui.log(`fallback counts: ${Array.from(counts, ([r, n]) => `${r}=${n}`).join(' ')}`);
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
   const ledger = new FidelityLedger();
   const fallbackCounts = new Map<string, number>();
-  const countFallback = ($: { ui: { log: (s: string) => void } }, reason: string) => {
-    fallbackCounts.set(reason, (fallbackCounts.get(reason) ?? 0) + 1);
-    if (configured.logDecisions) $.ui.log(`fallback counts: ${Array.from(fallbackCounts, ([r, n]) => `${r}=${n}`).join(' ')}`);
-  };
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
       // All doors supply UUID chronology; only deliveries become pinned rows.
@@ -368,7 +375,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
     const fallback = async (code: string, reason: string) => {
       notify($, `fallback to built-in summary (${reason})`);
-      countFallback($, code);
+      countFallback($, fallbackCounts, code, configured.logDecisions);
       const checkpoint = ledger.checkpoint();
       const result = await next(event); // keep the original handles for core
       if (result.skip === undefined) ledger.coreApplied(event.agentId, checkpoint);
@@ -377,27 +384,29 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let prepared: SessionCompaction;
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const projection = readPinProvenance(event.messages);
       // The actual host exposes rendered queued rows in its API-tail view. It
       // also accepts agentId; $.session.messages() without it is main-only.
       // Feature-detect by shape so older hosts/visible-only fixtures still use
       // the observer path, never a blanket startup summary.
       let apiHistory: unknown;
       try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); } catch { /* optional host capability */ }
-      recoverApiHistory(apiHistory, event.messages, ledger, event.agentId);
-      const input = ledger.prepare(event.messages, event.agentId);
+      recoverApiHistory(apiHistory, projection, ledger, event.agentId);
+      const input = ledger.prepare(projection, event.agentId);
       if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
       const asker = jevAsker(async (url, init) => {
           const response = await $.http.fetch(url, init);
           return { status: response.status, ok: response.ok, text: response.text };
         }, config.apiKey, config.model, async ms => { await $.clock.sleep(ms); });
       const result = await compact(input, asker, config);
-      const refreshed = ledger.prepare(event.messages, event.agentId);
+      const refreshed = ledger.prepare(projection, event.agentId);
       result.messages = ledger.restore(refreshed, result.messages);
       result.stats.messagesBefore = refreshed.length;
       result.stats.messagesAfter = result.messages.length;
       result.stats.charsBefore = refreshed.reduce((n, m) => n + messageChars(m), 0);
       result.stats.charsAfter = result.messages.reduce((n, m) => n + messageChars(m), 0);
-      prepared = { result, messages: toSessionMessages(event.messages, result.messages) };
+      const pins = new Set<number>();
+      prepared = { result, messages: persistPinProvenance(toSessionMessages(event.messages, result.messages, pins), pins) };
     } catch (error) {
       if (error instanceof FidelityError) return fallback('unreconstructable_delivery', error.message);
       if (error instanceof JevHttpError) return fallback('request_failure', `Jev HTTP ${error.status}; retry policy exhausted`);
@@ -434,7 +443,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       ownsCompaction = true;
       if (!supportsCompaction) {
         notify($, 'fallback to built-in summary (host has no session.compact event)');
-        countFallback($, 'host_without_compaction_event');
+        countFallback($, fallbackCounts, 'host_without_compaction_event', configured.logDecisions);
       }
       const outcome = await $.session.compact();
       if (outcome.skip === undefined && outcome.tokensAfter !== undefined) {
