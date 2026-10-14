@@ -585,7 +585,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let sid: string | undefined;
     try {
       const { context } = await $.session.usage();
-      try { sid = await ($.session as unknown as { id?: () => Promise<string> }).id?.(); } catch { sid = undefined; }
+      try { sid = await $.session.id(); } catch { sid = undefined; }
       const tokens = context.tokens;
       visible = tokens;
       const hold = sid ? notBefore.get(sid) : undefined;

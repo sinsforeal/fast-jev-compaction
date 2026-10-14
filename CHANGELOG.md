@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.5.0 - 2026-10-14
+
+Source: the User, 17:54 to 18:22 local: the Claude Code auto-compaction is off
+entirely (`DISABLE_AUTO_COMPACT=1` on the launcher); the plugin alone manages
+context. Jev prunes tool calls from a token trigger, aims at a real post-cut
+size, and when the unprunable context reaches two thresholds it orders the
+session to write a handoff, forces it, clears the session itself and resumes it
+from the handoff file. The built-in summary is never requested.
+
+- `compactAtTokens` (default 128000): the `turn.complete` trigger compares
+  `context.tokens` against it. `compactAtPercent` still applies when it is unset.
+- `targetVisibleTokens` (default 64000): after the first pass the cut is re-decided
+  from the cached Jev probabilities with a rising `keepThreshold` (0.05 steps,
+  then 1.0001) until the visible estimate is at or under the target; at the
+  floor, `replyMinChars` and `injectedMinChars` are halved once (floors 1100 and
+  200). No new Jev request. The estimate counts visible messages only; the real
+  context after a prune is the target plus the system and tool prefix.
+- A reduction-ratio miss returns `{ skip }` and writes
+  `<handoffDir>/<sessionId>/prune_skipped.json`. The `fallback(next)` path is
+  removed; `compactTranscript` stays as the offline recovery on transport failure.
+- A 32000-token hysteresis after any prune or skip stops a re-fire every turn.
+- Handoff orders (`hooks/handoff.ts`), state per session in `$.store`:
+  at `handoffAt` (default 250000) of unprunable context, once per 50000 of further
+  growth, `$.prompt.submit` of a HANDOFF SOON order; at `handoffForceAt` (default
+  300000) a HANDOFF NOW order, repeated at most three more times. When
+  `<handoffDir>/<sessionId>/latest.md` exists, names this session in its header,
+  ends with `COMPLETE` and is newer than the order: `resumed.json` is written,
+  `$.command.run({ command: "clear" })` runs (gated on `$.command.list()`
+  containing `clear`), and a HANDOFF RESUME order is submitted. After the clear
+  the session id is read again; a changed id gets copies of `latest.md` and
+  `resumed.json`, and `current_session.json` records `{ id, previous_id, at }`
+  in both cases. Never a clear without a complete file.
+- `handoffDir` (absolute) and `handoffSkillPath` (default `docs/HANDOFF_SKILL.md`
+  against the session cwd) are quoted in the orders.
+- Every log and notify line carries the session id's first 8 characters.
+- Six `userConfig` entries in `.claude-plugin/plugin.json`; the harness side
+  (`tools/hybrid_enable.py` in the Meta_Orchestrator repo) writes the first five.
+- Live checks owed before the User starts it: `$.command.run` with `clear` and
+  `$.prompt.submit` from a detached call after `turn.complete`, and whether the
+  session id survives the clear.
+
 ## 0.4.4 - 2026-10-14
 
 Source: the User, 15:23 local: "I need jev to actually work everytime. The only

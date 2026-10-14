@@ -200,14 +200,17 @@ Request failures after retry, missing keys, invalid engine results and local
 preparation failures use deterministic transcript recovery: preserve all text,
 calls, pinned/recent results, and truncate eligible older results using the
 existing head/evidence-note policy. Recovery is explicitly unscored. It passes
-through the same reduction gate; a missed ratio can still request core.
+through the same reduction gate; a missed ratio skips the cut (`{ skip }`), writes
+`<handoffDir>/<sessionId>/prune_skipped.json` and never requests the built-in
+summary. `targetVisibleTokens` counts the visible messages only, so the real
+context after a prune is the target plus the system and tool prefix.
 
 A host without `session.compact` has no supported replacement installation API.
 The usage hook logs that incompatibility and requests no built-in summary.
 Such a host needs a compatible runtime before it can apply Jev replacements.
 
-Every plugin-controlled fallback toasts its reason. With `logDecisions: true`,
-the decision log also includes cumulative session-local fallback counts by reason,
+Every skip and recovery toasts its reason. With `logDecisions: true`,
+the decision log also includes cumulative session-local skip counts by reason,
 alongside kept/dropped probabilities. Error bodies and credentials are omitted.
 Recovery reasons and chronology decisions also go to
 `~/.claude/fast-jev-compaction.log`. Disk/UI failures never change a cut.
@@ -226,24 +229,26 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fidelity/jev-041-20261014'
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#hybrid/handoff-20261014'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
 The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
-Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
-auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…; replacement prepared …)`
-when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
-does not meet the configured reduction ratio.
+Restart Claude Code or run `/reload-plugins`. From then on `/compact` and the
+plugin's own token trigger go through Jev: the toast reads
+`[sid] kept N/M messages, no summary (…; replacement prepared …)`
+when the hook returns a replacement, or `[sid] skipped (…)` when Jev does not meet
+the configured reduction ratio. The built-in summary is never requested. Run with
+`DISABLE_AUTO_COMPACT=1` so the harness's own compaction stays out of the loop.
 
-The branch-qualified source above selects the 0.4.4 candidate without promoting
-the fork's default branch. Ryan v2 owns installation under queue 0f83ff731638.
-For an existing declared source, preserve unrelated fields and
-set its GitHub `repo` to `sinsforeal/fast-jev-compaction` and `ref` to
-`fidelity/jev-041-20261014` before the add/update commands. Confirm both marketplace
-and cached plugin manifests say 0.4.4 before reloading. The 0.7 trial is unchanged.
+The branch-qualified source above selects the 0.5.0 candidate
+(`hybrid/handoff-20261014`) without promoting the fork's default branch. Ryan v2
+owns installation under queue hybrid-handoff-study-20261014. For an existing
+declared source, preserve unrelated fields and set its GitHub `repo` to
+`sinsforeal/fast-jev-compaction` and `ref` to `hybrid/handoff-20261014` before the
+add/update commands. Confirm both marketplace and cached plugin manifests say
+0.5.0 before reloading.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

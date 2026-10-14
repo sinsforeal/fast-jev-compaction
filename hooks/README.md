@@ -64,28 +64,42 @@ The plugin declares these `userConfig` values in
 | `replyMinChars` | `2000` |
 | `maxPostCompactTokens` | `0` |
 | `logDecisions` | `false` |
+| `compactAtTokens` | `128000` |
+| `targetVisibleTokens` | `64000` |
+| `handoffAt` | `250000` |
+| `handoffForceAt` | `300000` |
+| `handoffDir` | unset |
+| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
-`maxPostCompactTokens`, `logDecisions` and `model` is passed to the library; see the root README for what they
-do. The `session.compact` hook runs the Jev requests concurrently. Engine request
+Every option except `apiKey`, `compactAtPercent`, `compactAtTokens`,
+`targetVisibleTokens`, `handoffAt`, `handoffForceAt`, `handoffDir`,
+`handoffSkillPath`, `minReductionRatio`, `maxPostCompactTokens`, `logDecisions`
+and `model` is passed to the library; see the root README for what they do. The
+`session.compact` hook runs the Jev requests concurrently. Engine request
 failures, invalid results and local preparation failures log the reason and use
 deterministic transcript recovery. Text and calls stay; eligible older results
 are truncated with the existing evidence notes. The
 [root fidelity rules](../README.md#fidelity-rules) describe the policy.
-`minReductionRatio` is the sole summary gate. `maxPostCompactTokens` only warns.
-The outcome includes estimated visible post-cut size against the target.
-Detailed kept/dropped probabilities, fallback counts and text
-scores are logged only with `logDecisions: true`; arbitrary output and transport
-error bodies are omitted from diagnostics. The
-`turn.complete` hook requests
-compaction when `context.percent` reaches `compactAtPercent`, with an
-in-flight guard checked again after the usage read. Subagent completions cannot
-request a main-session cut. `precompute` is vetoed before network or UI work;
-it prepares a speculative result that the engine may never apply.
+A `minReductionRatio` miss returns `{ skip }` and writes a marker file; the
+built-in summary is never requested. `targetVisibleTokens` re-decides the cut
+from the cached probabilities until the visible estimate is at or under it.
+`maxPostCompactTokens` only warns. The outcome includes the estimated visible
+post-cut size and the threshold used. Detailed kept/dropped probabilities, skip
+counts and text scores are logged only with `logDecisions: true`; arbitrary
+output and transport error bodies are omitted from diagnostics. The
+`turn.complete` hook requests compaction when `context.tokens` reaches
+`compactAtTokens` (or `context.percent` reaches `compactAtPercent` when the token
+value is unset), with an in-flight guard checked again after the usage read and a
+32000-token hysteresis after a prune or skip. It then runs the handoff step:
+orders at `handoffAt` and `handoffForceAt`, the clear and the resume once
+`<handoffDir>/<sessionId>/latest.md` is complete (see `handoff.ts`). Subagent
+completions cannot request a main-session cut. `precompute` is vetoed before
+network or UI work; it prepares a speculative result that the engine may never
+apply.
 
 The first actual cut after start/reload uses Jev's handleless rebuild. Observers
 pin accepted mid-turn text/context and rendered deliveries; all append doors
