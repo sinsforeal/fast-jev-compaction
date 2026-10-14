@@ -13,7 +13,7 @@ Stage at 18:27: code and tests done and green (133 passed); docs partly done. Hi
 - d.ts: $.command.run (2484-2504) "rejects an unknown name, and inside a hook the turn is waiting on"; does not name clear. $.prompt.submit (2390-2402) "runs when idle". Neither says whether turn.complete is a hook the turn waits on, so both calls are detached (void, after a 250 ms $.clock.sleep) and clear is gated on $.command.list() containing "clear". Live check owed.
 - d.ts does not say whether clear keeps the session id (id() 2293: "the transcript file's name"); handled both ways (current_session.json).
 - Ids of unscored text blocks shift when replyMinChars changes, so cached answers are keyed by index:start:end:kind.
-- Defaults per coordinator: compactAtTokens 128000, targetVisibleTokens 64000, option names handoffAt / handoffForceAt.
+- Defaults per coordinator: compactAtTokens 160000 (Ryan 18:39: reads plus rewrites per turn balance 85k to 120k above the 94k post-cut; 128000 would prune every ten turns), targetVisibleTokens 64000, option names handoffAt / handoffForceAt.
 
 ## Tried / failed
 - A bash sed on hooks/handoff.ts was blocked by the agent_boundary hook (relative path); used Edit with absolute paths.

@@ -81,7 +81,7 @@
       "type": "number",
       "title": "Compaction token trigger",
       "description": "turn.complete requests a prune when the context holds at least this many tokens. Above 0 it replaces the percentage trigger; 0 uses the percentage.",
-      "default": 128000
+      "default": 160000
     },
     "targetVisibleTokens": {
       "type": "number",

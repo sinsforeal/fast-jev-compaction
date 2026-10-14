@@ -64,7 +64,7 @@ The plugin declares these `userConfig` values in
 | `replyMinChars` | `2000` |
 | `maxPostCompactTokens` | `0` |
 | `logDecisions` | `false` |
-| `compactAtTokens` | `128000` |
+| `compactAtTokens` | `160000` |
 | `targetVisibleTokens` | `64000` |
 | `handoffAt` | `250000` |
 | `handoffForceAt` | `300000` |
