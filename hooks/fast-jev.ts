@@ -619,11 +619,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Handoff machine: main loop, not after an interrupt, and only with a handoffDir.
     if (configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
       try {
-        const host = $ as unknown as HandoffHost & { session: { id: () => Promise<string>; cwd: () => Promise<string> } };
         let cwd: string | undefined;
-        try { cwd = await host.session.cwd(); } catch { cwd = undefined; }
+        try { cwd = await $.session.cwd(); } catch { cwd = undefined; }
         await handoffStep({
-          host, sessionId: sid, visible,
+          host: $ as unknown as HandoffHost, sessionId: sid, visible,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
             handoffDir: configured.handoffDir, handoffSkillPath: resolveSkillPath(cwd, configured.handoffSkillPath) },
           log: text => log($, text),
