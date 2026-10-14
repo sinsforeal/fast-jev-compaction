@@ -8,15 +8,18 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
+import { compact, messageChars, reductionRatio, resolveOptions } from '../src/compact.js';
 import { estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
+import { FidelityLedger, FidelityError } from './fidelity.js';
+import { recoverApiHistory, type RuntimeMessages } from './api-history.js';
 import {
   buildJevRequest,
   DEFAULT_MODEL,
   isRetryableStatus,
   parseJevResponse,
   JevHttpError,
+  JevResultError,
 } from '../src/request.js';
 import type {
   CompactOptions,
@@ -32,7 +35,7 @@ const HOOK_DEFAULTS = {
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
   logDecisions: false,
-  maxPostCompactTokens: 80_000,
+  maxPostCompactTokens: 0,
 };
 
 export type HookFetchInit = {
@@ -58,6 +61,8 @@ export type HookConfig = CompactOptions & {
   logDecisions: boolean;
   maxPostCompactTokens: number;
 };
+
+class JevRequestError extends Error {}
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
   const value = options[key];
@@ -120,11 +125,18 @@ export function jevAsker(
     async ask(state, questions) {
       const request = buildJevRequest({ apiKey, model }, state, questions);
       for (let attempt = 0; ; attempt++) {
-        const response = await fetchFn(request.url, {
-          method: request.method,
-          headers: request.headers,
-          body: request.body,
-        });
+        let response: HookFetchResponse;
+        try {
+          response = await fetchFn(request.url, {
+            method: request.method, headers: request.headers, body: request.body,
+          });
+        } catch {
+          if (attempt < retries) {
+            if (sleep) await sleep(retryDelayMs * (attempt + 1));
+            continue;
+          }
+          throw new JevRequestError('Jev transport failed after retry; details omitted');
+        }
         if (!response.ok && attempt < retries && isRetryableStatus(response.status)) {
           if (sleep) await sleep(retryDelayMs * (attempt + 1) * (0.75 + Math.random() * 0.5));
           continue;
@@ -217,7 +229,7 @@ export async function compactSession(
   fetchFn: HookFetch,
   sleep?: (ms: number) => Promise<void>,
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
+  if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
   const asker = jevAsker(fetchFn, config.apiKey, config.model, sleep);
   const result = await compact(messages, asker, config);
   return { result, messages: toSessionMessages(messages, result.messages) };
@@ -315,78 +327,102 @@ function notify(
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
-  let coreRequired: string | undefined = 'first cut after start/reload preserves legacy queued prompts and hidden content';
-  let safetyGeneration = 0;
-  let observesDeliveries = false;
+  const ledger = new FidelityLedger();
+  const fallbackCounts = new Map<string, number>();
+  const countFallback = ($: { ui: { log: (s: string) => void } }, reason: string) => {
+    fallbackCounts.set(reason, (fallbackCounts.get(reason) ?? 0) + 1);
+    if (configured.logDecisions) $.ui.log(`fallback counts: ${Array.from(fallbackCounts, ([r, n]) => `${r}=${n}`).join(' ')}`);
+  };
   try {
-    (on as unknown as DeliveryOn)('session.append', { door: 'delivery' }, async (_$, event, next) => {
-      if (event.agentId === undefined && event.message.type === 'attachment') {
-        safetyGeneration += 1;
-        coreRequired = 'hidden delivery requires the full original transcript';
-      }
-      return next(event);
+    (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
+      // All doors supply UUID chronology; only deliveries become pinned rows.
+      // $.session.messages is main-only: never use it to place a child's row.
+      let snapshot: SessionMessage[] = [];
+      try {
+        if (event.agentId === undefined && event.door === 'delivery') snapshot = await $.session.messages();
+      } catch { /* Observation must never block an append. UUID anchors remain usable. */ }
+      const result = await next(event);
+      if (!('deny' in result)) ledger.append({ ...event, ...result }, snapshot);
+      return result;
     });
-    observesDeliveries = true;
   } catch {
-    // Older hosts cannot expose hidden deliveries. Keep core in charge safely.
+    // Observer absence alone is not evidence that a particular cut is unsafe.
   }
 
   on('prompt.submit', async ($, event, next) => {
+    const relevant = event.turnId !== undefined || !!event.attachments?.length;
+    let snapshot: SessionMessage[] = [];
+    try { if (relevant) snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
+    const position = ledger.position();
     const result = await next(event);
-    if (result.drop === undefined && (event.turnId !== undefined || event.attachments?.length)) {
-      safetyGeneration += 1;
-      coreRequired = 'accepted queued prompt or non-text submission requires the full original transcript';
+    if (result.drop === undefined && relevant) {
+      ledger.prompt(result.text, result.context ?? [], !!event.attachments?.length, snapshot, position, result.origin ?? event.origin);
     }
     return result;
   });
 
-  on('session.compact', async ($, event, next) => {
+  let supportsCompaction = false;
+  try { on('session.compact', async ($, event, next) => {
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
-    const fallback = async (reason: string) => {
+    const fallback = async (code: string, reason: string) => {
       notify($, `fallback to built-in summary (${reason})`);
-      const generation = safetyGeneration;
+      countFallback($, code);
+      const checkpoint = ledger.checkpoint();
       const result = await next(event); // keep the original handles for core
-      if (event.agentId === undefined && result.skip === undefined && generation === safetyGeneration) coreRequired = undefined;
+      if (result.skip === undefined) ledger.coreApplied(event.agentId, checkpoint);
       return result;
     };
-    // Subagent projections do not expose their queued attachments to this main
-    // prompt observer either; let core preserve their complete input.
-    if (event.agentId !== undefined) return fallback('subagent compaction requires its full original transcript');
-    if (!observesDeliveries) return fallback('host cannot observe hidden deliveries safely');
-    if (coreRequired) return fallback(coreRequired);
     let prepared: SessionCompaction;
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      prepared = await compactSession(
-        event.messages,
-        config,
-        async (url, init) => {
+      // The actual host exposes rendered queued rows in its API-tail view. It
+      // also accepts agentId; $.session.messages() without it is main-only.
+      // Feature-detect by shape so older hosts/visible-only fixtures still use
+      // the observer path, never a blanket startup summary.
+      let apiHistory: unknown;
+      try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); } catch { /* optional host capability */ }
+      recoverApiHistory(apiHistory, event.messages, ledger, event.agentId);
+      const input = ledger.prepare(event.messages, event.agentId);
+      if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
+      const asker = jevAsker(async (url, init) => {
           const response = await $.http.fetch(url, init);
           return { status: response.status, ok: response.ok, text: response.text };
-        },
-        async (ms) => {
-          await $.clock.sleep(ms);
-        },
-      );
+        }, config.apiKey, config.model, async ms => { await $.clock.sleep(ms); });
+      const result = await compact(input, asker, config);
+      const refreshed = ledger.prepare(event.messages, event.agentId);
+      result.messages = ledger.restore(refreshed, result.messages);
+      result.stats.messagesBefore = refreshed.length;
+      result.stats.messagesAfter = result.messages.length;
+      result.stats.charsBefore = refreshed.reduce((n, m) => n + messageChars(m), 0);
+      result.stats.charsAfter = result.messages.reduce((n, m) => n + messageChars(m), 0);
+      prepared = { result, messages: toSessionMessages(event.messages, result.messages) };
     } catch (error) {
-      return fallback(error instanceof JevHttpError ? `Jev HTTP ${error.status}` : 'Jev preparation failed; details omitted');
+      if (error instanceof FidelityError) return fallback('unreconstructable_delivery', error.message);
+      if (error instanceof JevHttpError) return fallback('request_failure', `Jev HTTP ${error.status}; retry policy exhausted`);
+      if (error instanceof JevRequestError) return fallback('request_failure', error.message);
+      if (error instanceof JevResultError) return fallback('invalid_engine_result', 'invalid or out-of-range Jev engine result');
+      // Local state-budget/preparation refusal must not turn Jev into a summary.
+      notify($, 'Jev cut skipped (local preparation failed; history unchanged; details omitted)');
+      return { skip: 'Jev local preparation failed; history unchanged' };
     }
     const { result, messages } = prepared;
     if (configured.logDecisions) for (const line of decisionLogLines(result)) $.ui.log(line);
     const post = estimateSessionTokens(messages);
     if (configured.maxPostCompactTokens > 0 && post > configured.maxPostCompactTokens) {
-      return fallback(`estimated visible post-cut ~${post} tokens exceeds ${configured.maxPostCompactTokens} target`);
+      $.ui.log(`warn: estimated visible post-cut ~${post} tokens exceeds target ${configured.maxPostCompactTokens}; Jev replacement retained`);
     }
     if (reductionRatio(result) < configured.minReductionRatio) {
-      return fallback(`below ${percent(configured.minReductionRatio)} minimum: ${summarize(result)}`);
+      $.ui.log(`warn: reduction below ${percent(configured.minReductionRatio)} report threshold; Jev replacement retained`);
     }
-    // A prompt accepted while Jev was in flight must not vanish in a stale cut.
-    if (coreRequired) return fallback(coreRequired);
-    notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)}; replacement prepared for ${event.trigger})`);
+    notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
+    ledger.rebase(result.messages, event.agentId);
     return { messages };
-  });
+  }); supportsCompaction = true; } catch {
+    // Hosts predating session.compact keep their own summarizer. The plugin's
+    // usage hook reports this reason whenever it requests a cut on such a host.
+  }
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting || event.agentId !== undefined) return next(event);
@@ -396,6 +432,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (compacting || (context.percent ?? 0) < configured.compactAtPercent) return next(event);
       compacting = true;
       ownsCompaction = true;
+      if (!supportsCompaction) {
+        notify($, 'fallback to built-in summary (host has no session.compact event)');
+        countFallback($, 'host_without_compaction_event');
+      }
       const outcome = await $.session.compact();
       if (outcome.skip === undefined && outcome.tokensAfter !== undefined) {
         $.ui.log(`applied compaction: ${outcome.tokensBefore ?? '?'} -> ${outcome.tokensAfter} tokens (engine measurement)`);

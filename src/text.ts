@@ -78,7 +78,7 @@ export function collectTextBlocks(
     blocks.push({ ...block, id: `x${blocks.length + 1}`, duplicate: false });
   };
   messages.forEach((message, index) => {
-    const pinned = isPinned(index, messages.length, options.preserveRecentMessages);
+    const pinned = message.pinned === true || isPinned(index, messages.length, options.preserveRecentMessages);
     if (message.role === 'user' && options.injectedMinChars > 0) {
       for (const range of injectedRanges(message.text)) {
         const content = message.text.slice(range.start, range.end);
@@ -197,7 +197,7 @@ export function applyTextDecisions(
       const original = text.slice(block.start, block.end);
       text = text.slice(0, block.start) + replacement(block, decision, original) + text.slice(block.end);
     }
-    const rebuilt: Message = { role: message.role, text, toolUses: message.toolUses };
+    const rebuilt: Message = { ...message, text };
     if (message.toolResults) rebuilt.toolResults = message.toolResults;
     return rebuilt;
   });

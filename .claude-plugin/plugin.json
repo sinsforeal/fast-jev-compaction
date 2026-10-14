@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
@@ -31,8 +31,8 @@
     },
     "minReductionRatio": {
       "type": "number",
-      "title": "Minimum reduction ratio",
-      "description": "Minimum visible character reduction required to replace history; post-cut token target is checked separately.",
+      "title": "Reduction report threshold",
+      "description": "Warn below this visible character reduction; never triggers built-in summary.",
       "default": 0.25
     },
     "maxStateTokens": {
@@ -74,8 +74,8 @@
     "maxPostCompactTokens": {
       "type": "number",
       "title": "Visible post-cut token target",
-      "description": "Fall back to built-in summary above this estimated visible conversation size; excludes system/tool prefix; 0 disables the target.",
-      "default": 80000
+      "description": "Report visible conversation size against this warning threshold; never triggers summary; excludes system/tool prefix; 0 disables the warning.",
+      "default": 0
     },
     "logDecisions": {
       "type": "boolean",

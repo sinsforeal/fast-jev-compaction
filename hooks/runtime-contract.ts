@@ -4,14 +4,16 @@
  * edit them by hand. Append identity is pinned; this observer forwards unchanged.
  */
 export type DeliveryAppend = {
-  door: 'delivery';
-  message: { type: string; name?: string };
+  door: string;
+  message: { type: string; name?: string; role?: string;
+    content?: readonly ({ kind: string; text?: string; [key: string]: unknown })[] };
   uuid: string;
   agentId?: string;
+  origin?: unknown;
 };
 
 export type DeliveryOn = (
   name: 'session.append',
-  matcher: { door: 'delivery' },
-  handler: ($: unknown, event: DeliveryAppend, next: (event: DeliveryAppend) => Promise<unknown>) => Promise<unknown>,
+  handler: ($: { session: { messages: () => Promise<import('claude-code').SessionMessage[]> } },
+    event: DeliveryAppend, next: (event: DeliveryAppend) => Promise<DeliveryAppend | { deny: string }>) => Promise<DeliveryAppend | { deny: string }>,
 ) => unknown;

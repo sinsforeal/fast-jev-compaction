@@ -28,6 +28,12 @@ export interface Message {
   text: string;
   toolUses: ToolUse[];
   toolResults?: ToolResult[];
+  /** Observer-confirmed instructions/deliveries are never scored or edited. */
+  pinned?: boolean;
+  /** Hook-local chronological position, discarded by host reconstruction. */
+  fidelityOrder?: number;
+  /** Hook-local observer identities, never returned in the host projection. */
+  fidelityPins?: number[];
 }
 
 /** A tool call paired with its result by `tool_use_id`. */

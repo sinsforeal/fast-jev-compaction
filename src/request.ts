@@ -47,6 +47,9 @@ export class JevHttpError extends Error {
   }
 }
 
+/** A successful HTTP response that cannot safely drive a compaction. */
+export class JevResultError extends Error {}
+
 /** Statuses worth one retry: an edge block or rate limit (403 HTML, 429) and server errors. */
 export function isRetryableStatus(status: number): boolean {
   return status === 403 || status === 429 || status >= 500;
@@ -79,16 +82,16 @@ export function parseJevResponse(
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error('Jev returned malformed JSON');
+    throw new JevResultError('Jev returned malformed JSON');
   }
   if (
     parsed === null ||
     typeof parsed !== 'object' ||
     !('answers' in parsed) ||
-    parsed.answers === null ||
+    parsed.answers === null || Array.isArray(parsed.answers) ||
     typeof parsed.answers !== 'object'
   ) {
-    throw new Error('Jev response is missing answers');
+    throw new JevResultError('Jev response is missing answers');
   }
   return parsed as JevResponse;
 }
@@ -100,12 +103,12 @@ export function noulAnswer(
 ): number {
   const answer = answers[name];
   if (
-    !answer ||
+    !answer || typeof answer !== 'object' ||
     !('noul' in answer) ||
     typeof answer.noul !== 'number' ||
     !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1
   ) {
-    throw new Error(`Invalid Jev answer for ${name}`);
+    throw new JevResultError(`Invalid Jev answer for ${name}`);
   }
   return answer.noul;
 }

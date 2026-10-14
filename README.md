@@ -12,8 +12,8 @@ lossy: a file path, exact error, constraint, or command can disappear even when
 it matters later. This library retains the projected history while removing stale
 tool evidence and recognized injected blocks. Old long assistant replies can be
 abridged to their opening and closing. Untagged user text and fenced examples stay
-verbatim. The hook uses the built-in summary when full hidden deliveries must be
-preserved or the estimated surviving conversation would remain too large.
+verbatim. Mid-turn instructions and rendered queued deliveries are pinned verbatim,
+including after resume and in child loops. Depth and reduction are measurements.
 
 The repository is both an npm package (`src/`) and a Claude Code plugin
 (`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
@@ -120,7 +120,7 @@ put it in a source file.
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
 | `injectedMinChars` | `1000` | Recognized injected blocks at least this long are scored; 0 disables it |
 | `replyMinChars` | `2000` | Old assistant replies can be abridged; 0 disables it |
-| `maxPostCompactTokens` | `80000` | Hook only: fall back above estimated visible conversation size; 0 disables |
+| `maxPostCompactTokens` | `0` | Hook only: warn above estimated visible size; never triggers summary; 0 disables warning |
 | `logDecisions` | `false` | Hook only: opt-in kept/dropped probabilities and text decisions |
 
 `result.stats` reports message and character counts before and after, the
@@ -132,13 +132,14 @@ stage was needed, and the number of requests.
 - Visible post-cut tokens are estimated, excluding system instructions, tool schemas
   and hidden blocks. The outcome is a prepared replacement; the next request's
   measured prompt size is the acceptance check.
-- Generated declarations are from 2.1.274; 0.4.0's supplemental delivery observer
+- Generated declarations are from 2.1.274; the supplemental delivery/API observers
   was verified on Claude Code 2.1.299. Older hosts may reject it during scanning;
   retain the 0.3.0 cache for rollback. Organization-managed installations can skip
   user-installed compaction hooks under managed policy.
-- Custom cuts discard hidden media/thinking even in pinned projected rows. Non-text
-  submissions and hidden deliveries route to core; a first core cut after every
-  start/reload establishes a safe legacy-resume baseline.
+- Handleless cuts discard unprojected assistant thinking. Observed opaque user
+  content that the host cannot reconstruct requires a logged exception for that
+  cut. The API view is a bounded tail: it supplements the projection rather than
+  replacing older history, and cannot prove unseen content outside that tail.
 - Calibration is at the request level; a probability is not a proof that a
   result is safe to delete. The assistant can always re-run the tool.
 - The full state is repeated with every request, so a history near the state
@@ -147,10 +148,41 @@ stage was needed, and the number of requests.
 ## Claude Code plugin
 
 The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
-is a thin adapter that feeds `session.compact` transcripts through `src/` and
-falls back to Claude Code's built-in summary on errors or insufficient
-reduction. See [`hooks/README.md`](hooks/README.md) for configuration and the
+feeds `session.compact` transcripts through `src/` and preserves observer-confirmed
+instructions. See [`hooks/README.md`](hooks/README.md) for configuration and the
 Claude Code 2.1.274 type reference and the verified 2.1.299 observer contract.
+
+### Fidelity rules
+
+Jev handles the first cut after startup or `--resume`, mid-turn submissions,
+hidden rendered deliveries and subagent compactions. Accepted prompt text and
+context, and queued attachments rendered as text, stay verbatim and unscored at
+their observed chronological positions. Deliveries arriving during scoring are
+inserted before returning the replacement. Rows get fresh host IDs and parents.
+`maxPostCompactTokens` (default 0) and `minReductionRatio` only report warnings;
+neither can request a summary at any configured value.
+
+The exhaustive reasons for yielding to the built-in summary are:
+
+- `request_failure`: Jev transport failure after one retry, retryable HTTP failure
+  after the retry, non-retryable HTTP rejection, or an unavailable API key.
+- `invalid_engine_result`: malformed/missing answers or a non-finite/out-of-range
+  probability. Invalid results never remove history.
+- `host_without_compaction_event`: the host cannot run `session.compact`. The
+  usage-request path toasts/logs this reason if registration can continue; a host
+  rejecting the module before registration runs its own compactor.
+- `unreconstructable_delivery`: the brief's explicit per-cut fidelity exception.
+  A known delivery lacks observable content, contains opaque blocks unsupported
+  by the host's handleless `SessionMessage` schema, a submitted attachment exposes
+  metadata without a reconstructable delivery, or observed chronology cannot be
+  aligned unambiguously. The toast names the exact fixed reason for that cut.
+  This is never a startup, resume, subagent or persistent safety flag.
+
+Every plugin-controlled fallback toasts its reason. With `logDecisions: true`,
+the decision log also includes cumulative session-local fallback counts by reason,
+alongside kept/dropped probabilities. Error bodies and credentials are omitted.
+Local state-budget/preparation failures veto that cut with history unchanged;
+they do not call the summary. Speculative `precompute` remains vetoed.
 
 ### Install in Claude Code
 
@@ -175,7 +207,7 @@ Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
 `fast-jev-compaction: kept N/M messages, no summary (…; replacement prepared …)`
 when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
-could not remove enough (short sessions, or when it fails).
+cannot safely supply a replacement for one of the fidelity reasons above.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

@@ -21,6 +21,7 @@ function harness(options = {}) {
     http: { fetch: vi.fn(jevFetch) }, clock: { sleep: async () => {} },
     ui: { log: (text: string) => logs.push(text), toast: vi.fn() },
     session: { usage: vi.fn(async () => ({ context: { percent: 70 } })),
+      messages: vi.fn(async () => transcript()),
       compact: vi.fn(async () => ({ messages: [], tokensBefore: 200000, tokensAfter: 45000 })) } };
   const core = vi.fn(async (event: any) => ({ messages: [m('user', 'builtin summary including queued user prompt')] }));
   const event = (trigger = 'auto') => ({ trigger, messages: transcript() });
@@ -37,12 +38,13 @@ describe('applied versus speculative cuts and safe fallback', () => {
     expect(h.logs).toEqual([]);
   });
 
-  it('protects legacy resumed hidden prompts on first cut, then uses Jev', async () => {
+  it('uses handleless Jev reconstruction on the first and subsequent resumed cuts', async () => {
+    // Adapted for 0.4.1 brief: handleless rebuild itself is the resume baseline.
     const h = harness();
     const firstEvent = h.event();
     await h.handlers['session.compact'](h.$, firstEvent, h.core);
-    expect(h.core).toHaveBeenCalledWith(firstEvent); // original handles reach core
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
+    expect(h.core).not.toHaveBeenCalled();
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(1);
     const result = await h.handlers['session.compact'](h.$, h.event(), h.core);
     expect(result.messages.every((row: any) => !row.handle)).toBe(true);
     expect(h.$.http.fetch).toHaveBeenCalled();
@@ -50,72 +52,85 @@ describe('applied versus speculative cuts and safe fallback', () => {
     expect(h.logs.some(s => s.startsWith('kept') && s.includes('replacement prepared'))).toBe(true);
   });
 
-  it('routes accepted mid-turn prompts to original core and ignores dropped submissions', async () => {
+  it('pins accepted mid-turn prompts through Jev and ignores dropped submissions', async () => {
+    // Adapted for 0.4.1 brief: retain instructions, never a standing core flag.
     const h = harness();
     await h.handlers['session.compact'](h.$, h.event(), h.core);
     await h.handlers['prompt.submit'](h.$, { text: 'do not run', turnId: 'active', wait: false }, async () => ({ text: 'do not run' }));
     const event = h.event();
-    await h.handlers['session.compact'](h.$, event, h.core);
-    expect(h.core).toHaveBeenLastCalledWith(event);
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
+    const out = await h.handlers['session.compact'](h.$, event, h.core);
+    expect(out.messages.some(row => row.text === 'do not run')).toBe(true);
+    expect(h.core).not.toHaveBeenCalled();
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(2);
     await h.handlers['prompt.submit'](h.$, { text: 'ignored', turnId: 'active', wait: false }, async () => ({ drop: 'fixture' }));
-    await h.handlers['session.compact'](h.$, h.event(), h.core);
+    const later = await h.handlers['session.compact'](h.$, h.event(), h.core);
+    expect(later.messages.some(row => row.text === 'ignored')).toBe(false);
     expect(h.$.http.fetch).toHaveBeenCalled();
   });
 
-  it('keeps a prompt accepted during core compaction flagged for the next cut', async () => {
+  it('keeps a prompt accepted during Jev preparation verbatim in this cut', async () => {
+    // Adapted for 0.4.1 brief: late arrivals are inserted before returning history.
     const h = harness();
-    await h.handlers['session.compact'](h.$, h.event(), async () => {
+    h.$.http.fetch.mockImplementationOnce(async (url, init) => {
       await h.handlers['prompt.submit'](h.$, { text: 'new', turnId: 'active' }, async () => ({ text: 'new' }));
-      return { messages: [] };
+      return jevFetch(url, init);
     });
-    await h.handlers['session.compact'](h.$, h.event(), h.core);
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
-    expect(h.core).toHaveBeenCalledTimes(1);
+    const out = await h.handlers['session.compact'](h.$, h.event(), h.core);
+    expect(out.messages.some(row => row.text === 'new')).toBe(true);
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(1);
+    expect(h.core).not.toHaveBeenCalled();
   });
 
   it('protects internal queued deliveries that bypass prompt.submit', async () => {
+    // Adapted for 0.4.1 brief: capture rendered blocks from the observer, pin them.
     const h = harness();
     await h.handlers['session.compact'](h.$, h.event(), h.core);
-    const appended = { door: 'delivery', uuid: 'delivery', message: { type: 'attachment', name: 'queued_command' } };
+    const appended = { door: 'delivery', uuid: 'delivery', message: { type: 'attachment', name: 'queued_command', content: [{ kind: 'text', text: 'exact queued instruction' }] } };
     const next = vi.fn(async e => e);
     await h.handlers['session.append'](h.$, appended, next);
     expect(next).toHaveBeenCalledWith(appended);
-    await h.handlers['session.compact'](h.$, h.event(), h.core);
-    expect(h.core).toHaveBeenCalledTimes(2);
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
+    const out = await h.handlers['session.compact'](h.$, h.event(), h.core);
+    expect(out.messages.some(row => row.text === 'exact queued instruction')).toBe(true);
+    expect(h.core).not.toHaveBeenCalled();
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('retains a core requirement when core skips, and never retries a failed core', async () => {
+  it('retains an unreconstructable row when core skips, and never retries a failed core', async () => {
+    // Adapted for 0.4.1 brief: only a demonstrated opaque row can require core.
     const h = harness();
+    await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque',
+      message: { type: 'attachment', content: [{ kind: 'block', index: 0 }] } }, async e => e);
     await h.handlers['session.compact'](h.$, h.event(), async () => ({ skip: 'blocked' }));
     await h.handlers['session.compact'](h.$, h.event(), h.core);
     expect(h.$.http.fetch).not.toHaveBeenCalled();
-    await h.handlers['prompt.submit'](h.$, { text: 'queued', turnId: 'active' }, async () => ({ text: 'queued' }));
+    await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque2',
+      message: { type: 'attachment', content: [{ kind: 'block', index: 0 }] } }, async e => e);
     const broken = vi.fn(async () => { throw new Error('core failed'); });
     await expect(h.handlers['session.compact'](h.$, h.event(), broken)).rejects.toThrow('core failed');
     expect(broken).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back on hosts that do not support the delivery observer', async () => {
+  it('does not establish a blanket summary policy when the delivery observer is unavailable', async () => {
+    // Adapted for 0.4.1 brief: missing observer is not missing compaction event.
     const handlers: Record<string, Function> = {};
     register(((name: string, handler: Function) => {
       if (name === 'session.append') throw new Error('unsupported');
       handlers[name] = handler;
-    }) as any, { apiKey: 'fixture' });
+    }) as any, { apiKey: 'fixture', preserveRecentMessages: 1 });
     const h = harness();
     await handlers['session.compact'](h.$, h.event(), h.core);
     await handlers['session.compact'](h.$, h.event(), h.core);
-    expect(h.core).toHaveBeenCalledTimes(2);
-    expect(h.$.http.fetch).not.toHaveBeenCalled();
+    expect(h.core).not.toHaveBeenCalled();
+    expect(h.$.http.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('falls back based on post-cut size even when percentage reduction is large', async () => {
+  it('reports post-cut size without triggering a summary', async () => {
+    // Adapted for 0.4.1 brief: target is a warning threshold at every value.
     const h = harness({ maxPostCompactTokens: 10 });
     await h.handlers['session.compact'](h.$, h.event(), h.core);
     await h.handlers['session.compact'](h.$, h.event(), h.core);
-    expect(h.core).toHaveBeenCalledTimes(2);
-    expect(h.logs.at(-1)).toContain('exceeds 10 target');
+    expect(h.core).not.toHaveBeenCalled();
+    expect(h.logs.some(s => s.includes('exceeds target 10'))).toBe(true);
   });
 
   it('opt-in diagnostics include kept calls as well as dropped results', async () => {

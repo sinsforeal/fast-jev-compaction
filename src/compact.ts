@@ -264,7 +264,7 @@ export function applyDecisions(
     if (message.text.trim().length === 0 && !marker && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
-    const rebuilt: Message = { role: message.role, text: [message.text, marker].filter(Boolean).join('\n'), toolUses };
+    const rebuilt: Message = { ...message, text: [message.text, marker].filter(Boolean).join('\n'), toolUses, toolResults: undefined };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.1 - 2026-10-14
+
+Source for every change below: Ryan v2's **Jev fork 0.4.1 fidelity brief**, written
+2026-10-14 08:05, and the User's 06:43 ruling, "You are not turning off Jev."
+
+- Brief 1: `maxPostCompactTokens` defaults to 0 and only warns. The kept toast
+  reports estimated visible post-cut tokens against the target at any value;
+  size never triggers summary. Low reduction also warns instead of summarizing
+  (brief 5's exhaustive fallback policy).
+- Brief 2: pin accepted mid-turn prompts/context and rendered `session.append`
+  deliveries verbatim. Observe all append UUIDs for chronology, correlate queued
+  deliveries with provisional submissions, and restore arrivals during scoring.
+  Track pinned identities across cuts; repeated equal instructions remain distinct.
+- Brief 3: first startup/resume cut uses Jev's handleless rebuild. Recover known
+  historical hidden text through 2.1.299's bounded API-tail view, aligned to visible
+  text/tool anchors. Never substitute the bounded tail for the older history.
+- Brief 4: subagent compactions use Jev; select child API history and isolate its
+  observer ledger. Queued rendered attachments are passed verbatim and unscored.
+  Main-session usage requests remain protected from child completions.
+- Brief 5: one retry for transport failures as well as the existing retryable
+  HTTP statuses. Classify request failures and invalid/missing/out-of-range engine
+  results separately; report a missing compaction event. Every controlled fallback
+  toasts its reason; opt-in decision logs count reasons cumulatively. Local budget
+  failures veto the cut rather than summarizing. Brief 2's explicit one-cut
+  exception covers known opaque/unobservable deliveries or unprovable chronology;
+  2.1.299's handleless schema cannot carry opaque media blocks.
+- Brief 6: retain precompute veto, handleless fresh IDs/parents, sibling/result
+  merging, Unicode pair safety, evidence markers, opt-in kept/dropped probability
+  logging and usage guard. All 70 existing tests remain; adapted fallback tests
+  state the brief's reason inline. Add pinned-before 4cc723a fidelity regressions.
+
+No engine/model change or keepThreshold 0.7 settings-trial change. Plugin,
+marketplace, npm package and lockfile root versions are 0.4.1.
+
 ## 0.4.0 - 2026-10-14
 
 - Veto speculative `precompute` Jev calls without a toast. Actual cuts say
