@@ -95,7 +95,8 @@ for (const [name, fail] of [
   ['transport_error', async () => { throw new Error('network'); }],
   ['invalid_engine_result', async () => ({ status: 200, ok: true, text: '{"answers":{}}' })],
 ] as const) it(`044 ${name}_compacts_transcript_and_logs_reason`, async () => {
-  const h = harness(); h.fetch.mockImplementation(fail as any);
+  const h = harness(); h.$.env.get = async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? undefined : 'F:/temp/jev-fixture'; // non-hybrid session: keeps the 0.4.4 recovery cut
+  h.fetch.mockImplementation(fail as any);
   const out = await h.cut();
   expect(h.core).not.toHaveBeenCalled(); expect(out.skip).toBeUndefined();
   expect(out.messages.some(m => m.toolUses.some(t => t.tool_use_id === 'r'))).toBe(true);
@@ -109,12 +110,13 @@ it('044 missing_key_compacts_transcript', async () => {
   expect(h.logs.join(' ')).toContain('TYPESAFE_API_KEY is not configured');
 });
 it('044 local_budget_failure_compacts_transcript', async () => {
-  const h = harness({ maxRequestTokens: 1 }); const out = await h.cut();
+  const h = harness({ maxRequestTokens: 1 }); h.$.env.get = async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? undefined : 'F:/temp/jev-fixture'; // non-hybrid session: keeps the 0.4.4 recovery cut
+  const out = await h.cut();
   expect(out.skip).toBeUndefined(); expect(h.core).not.toHaveBeenCalled();
   expect(h.disk()).toContain('local transcript preparation or scoring failed');
 });
 it('044 recovery_ignores_scoring_threshold_and_keeps_late_delivery', async () => {
-  const h = harness({ keepThreshold: 2 });
+  const h = harness({ keepThreshold: 2 }); h.$.env.get = async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? undefined : 'F:/temp/jev-fixture'; // non-hybrid session: keeps the 0.4.4 recovery cut
   h.fetch.mockImplementation(async () => {
     await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'late',
       message: { type: 'attachment', content: [{ kind: 'text', text: 'late instruction' }] } }, async e => e);

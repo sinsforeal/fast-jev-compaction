@@ -79,7 +79,7 @@ it('041: subagent queued rendered attachment remains verbatim without scoring or
   expect(h.fetch.mock.calls.every(([, init]) => !Object.values(JSON.parse(init.body).questions).some((q: any) => q.instructions.includes('system reminder')))).toBe(true);
 });
 it('044: request failure retries once and logs transcript recovery without transport text', async () => {
-  const h = harness({ logDecisions: true });
+  const h = harness({ logDecisions: true }); h.$.env.get = async () => undefined as any; // non-hybrid session: keeps the recovery cut
   h.fetch.mockImplementation(async () => { throw new Error('sensitive fixture echo'); });
   await h.cut(); await h.cut();
   expect(h.fetch).toHaveBeenCalledTimes(4); expect(h.core).not.toHaveBeenCalled();

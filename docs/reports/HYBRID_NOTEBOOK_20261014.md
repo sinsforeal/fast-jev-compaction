@@ -33,3 +33,9 @@ Still owed (pick up here): CHANGELOG 0.5.0 entry; README cleanup (Fidelity rules
 Docs done. Found on arrival: CHANGELOG 0.5.0 entry, README options/handoff/install/fidelity text and hooks/README config table and trigger text were already rewritten for 0.5.0. Fixed what was left: CHANGELOG said compactAtTokens default 128000 (now 160000); README "sole built-in-summary gate" for minReductionRatio reworded to a skip gate; the targetVisibleTokens "visible messages only" sentence added to README Limitations. Noted: README handoffAt/handoffForceAt rows say "visible size" while the order texts say "unprunable context"; same number (post-cut estimate or context.tokens), left as is. Live checks still owed: $.command.run clear, $.prompt.submit detached, session id at a clear.
 
 Gotchas: node_modules installed with npm ci in the worktree (gitignored). The turn.complete handler needs $.session.id; hosts without it get no prefix and no handoff step.
+
+## Stage at 19:03 (0.5.2, Ryan v2)
+
+- The User 18:59: with Jev unavailable a hybrid session never cuts blind; `session.compact` skips with `prune_skipped.json` (reason `Jev unavailable (...)`) and counts `jev_unavailable`; the handoff takes over at handoffAt/handoffForceAt. Non-hybrid sessions keep the 0.4.4 transcript recovery cut.
+- Six 044 recovery tests ran under a shim that hardcodes `DISABLE_AUTO_COMPACT=1`; they now override the env to non-hybrid. New hybrid test covers both branches.
+- Model slug: the fork sends `jev-latest` (no `model` pin in the user options); the response and log carry no version, so which Jev build the alias resolves to is not observable from here.
