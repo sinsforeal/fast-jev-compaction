@@ -1,18 +1,19 @@
 # fast-jev-compaction
 
 Claude Code plugin that replaces the compaction summary with Jev decisions:
-every tool call and result is scored in one fast request, stale ones are
-dropped or truncated, everything kept stays verbatim. Also usable as an npm
+tool calls, results and recognized message text are scored in bounded requests;
+stale items are dropped or abridged, retained blocks stay verbatim. Also usable as an npm
 library.
 
 ## What and why
 
 Most context compaction asks an LLM to summarize old turns. A summary is
 lossy: a file path, exact error, constraint, or command can disappear even when
-it matters later. This library never rewrites anything. It only deletes tool
-calls and tool results Jev says are no longer needed, and it asks Jev while
-showing it the whole conversation. User and assistant text stays verbatim and
-in order.
+it matters later. This library retains the projected history while removing stale
+tool evidence and recognized injected blocks. Old long assistant replies can be
+abridged to their opening and closing. Untagged user text and fenced examples stay
+verbatim. The hook uses the built-in summary when full hidden deliveries must be
+preserved or the estimated surviving conversation would remain too large.
 
 The repository is both an npm package (`src/`) and a Claude Code plugin
 (`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
@@ -43,15 +44,22 @@ built-in compaction summary with the original messages.
 5. Questions are split into as many requests as needed so state plus questions
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
    limit). The same full state is resent with every request; requests run
-   concurrently and their answers are merged.
+   with at most four requests in flight and their answers are merged.
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its
      first `truncateHeadChars` characters plus a one-line note;
    - else → remove the call together with its result.
 7. The message list is rebuilt: a message that loses all its content is
-   removed, untouched messages are returned as the same objects, and no result
-   is ever left without its call.
+   removed except for short supporting-evidence markers. The library returns
+   untouched messages as the same objects and drops a call together with its result.
+8. Recognized injected text and long replies are scored too, using bounded previews
+   in the state. Pinned text is kept. Blocks whose evidence vanishes during state
+   fitting are kept unscored. Recognition is structural: an unfenced user message
+   imitating harness tags can match; set `injectedMinChars: 0` to disable it.
+9. The Claude hook rebuilds all retained rows without opaque handles and groups
+   consecutive assistant rows together. This removes stale IDs/parents, hidden
+   thinking and media. A non-text placeholder records an otherwise empty result.
 
 Jev failures, malformed answers, a missing key, or a history that cannot be
 fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
@@ -110,6 +118,10 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `injectedMinChars` | `1000` | Recognized injected blocks at least this long are scored; 0 disables it |
+| `replyMinChars` | `2000` | Old assistant replies can be abridged; 0 disables it |
+| `maxPostCompactTokens` | `80000` | Hook only: fall back above estimated visible conversation size; 0 disables |
+| `logDecisions` | `false` | Hook only: opt-in kept/dropped probabilities and text decisions |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -117,9 +129,16 @@ stage was needed, and the number of requests.
 
 ## Limitations
 
-- Only tool calls and results are candidates; text messages are never removed
-  or shortened in the output (they are only abridged in the state Jev sees).
-- Token sizes are estimates from character counts, not a tokenizer.
+- Visible post-cut tokens are estimated, excluding system instructions, tool schemas
+  and hidden blocks. The outcome is a prepared replacement; the next request's
+  measured prompt size is the acceptance check.
+- Generated declarations are from 2.1.274; 0.4.0's supplemental delivery observer
+  was verified on Claude Code 2.1.299. Older hosts may reject it during scanning;
+  retain the 0.3.0 cache for rollback. Organization-managed installations can skip
+  user-installed compaction hooks under managed policy.
+- Custom cuts discard hidden media/thinking even in pinned projected rows. Non-text
+  submissions and hidden deliveries route to core; a first core cut after every
+  start/reload establishes a safe legacy-resume baseline.
 - Calibration is at the request level; a probability is not a proof that a
   result is safe to delete. The assistant can always re-run the tool.
 - The full state is repeated with every request, so a history near the state
@@ -131,7 +150,7 @@ The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
 is a thin adapter that feeds `session.compact` transcripts through `src/` and
 falls back to Claude Code's built-in summary on errors or insufficient
 reduction. See [`hooks/README.md`](hooks/README.md) for configuration and the
-Claude Code 2.1.274 type reference.
+Claude Code 2.1.274 type reference and the verified 2.1.299 observer contract.
 
 ### Install in Claude Code
 
@@ -146,7 +165,7 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
+claude plugin marketplace add sinsforeal/fast-jev-compaction
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -154,8 +173,8 @@ The install prompts for the plugin options (API key, thresholds, `truncateHeadCh
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
 Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
-replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
+`fast-jev-compaction: kept N/M messages, no summary (…; replacement prepared …)`
+when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
 could not remove enough (short sessions, or when it fails).
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
@@ -173,7 +192,8 @@ npm run validate:plugin  # claude plugin validate
 TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
 ```
 
-The unit tests use a fake Jev and never contact TypeSafe. The demo is the live
+The unit tests use a fake Jev and never contact TypeSafe. Tests discover only
+`tests/**/*.test.ts`, excluding baseline worktrees under `tmp/`. The demo is the live
 network check.
 
 ## Animated demo (macOS)

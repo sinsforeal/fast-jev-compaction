@@ -1,5 +1,7 @@
 import { noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { applyTextDecisions, collectTextBlocks, decideText, textCandidates, textQuestionsFor } from './text.js';
+import { safeSlice } from './unicode.js';
 import type {
   CallAnswer,
   CallDecision,
@@ -12,6 +14,9 @@ import type {
   ResolvedCompactOptions,
   ToolCall,
   ToolUse,
+  TextBlock,
+  TextAnswer,
+  TextDecision,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -21,6 +26,8 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
+  injectedMinChars: 1000,
+  replyMinChars: 2000,
 };
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
@@ -74,6 +81,8 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
+    injectedMinChars: Math.max(0, Math.floor(finite(options.injectedMinChars, DEFAULT_OPTIONS.injectedMinChars))),
+    replyMinChars: Math.max(0, Math.floor(finite(options.replyMinChars, DEFAULT_OPTIONS.replyMinChars))),
   };
 }
 
@@ -100,12 +109,22 @@ export function batchCalls(
   stateTokens: number,
   options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
 ): ToolCall[][] {
+  return batchItems(calls, questionsFor, stateTokens, options);
+}
+
+export function batchItems<T>(
+  items: readonly T[],
+  questionsOf: (item: T) => JevQuestions,
+  stateTokens: number,
+  options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
+): T[][] {
   const budget = options.maxRequestTokens - stateTokens - REQUEST_OVERHEAD_TOKENS;
-  const batches: ToolCall[][] = [];
-  let current: ToolCall[] = [];
+  const batches: T[][] = [];
+  let current: T[] = [];
   let currentTokens = 0;
-  for (const call of calls) {
-    const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
+  for (const call of items) {
+    const tokens = estimateTokens(JSON.stringify(questionsOf(call)));
+    if (tokens > budget) throw new Error('no room for Jev state and one question under maxRequestTokens');
     if (current.length > 0 && currentTokens + tokens > budget) {
       batches.push(current);
       current = [];
@@ -159,8 +178,9 @@ async function askBatch(
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+  const retained = safeSlice(text, 0, headChars);
+  const head = headChars > 0 ? `${retained}\n` : '';
+  return `${head}[fast-jev-compaction truncated ${text.length - retained.length} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }
@@ -239,10 +259,12 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
+    const removed = message.toolUses.filter(tool => actions.get(tool.tool_use_id) === 'drop_call');
+    const marker = removed.length > 0 ? `[fast-jev-compaction removed ${removed.length} tool call(s) and their results; earlier answers may rely on that evidence]` : '';
+    if (message.text.trim().length === 0 && !marker && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
-    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
+    const rebuilt: Message = { role: message.role, text: [message.text, marker].filter(Boolean).join('\n'), toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
@@ -268,7 +290,7 @@ export function reductionRatio(result: Pick<CompactResult, 'stats'>): number {
   return charsBefore === 0 ? 0 : (charsBefore - charsAfter) / charsBefore;
 }
 
-function count(decisions: readonly CallDecision[], reason: CallDecision['reason']): number {
+function count(decisions: readonly { reason: string }[], reason: string): number {
   return decisions.filter((decision) => decision.reason === reason).length;
 }
 
@@ -288,26 +310,55 @@ export async function compact(
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
   const candidates = calls.filter((call) => !call.pinned);
+  const blocks = collectTextBlocks(messages, resolved);
+  let textAsked = textCandidates(blocks, resolved);
+  const unrepresented = new Set<string>();
   const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
 
   let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
   let batches: ToolCall[][] = [];
   const answers = new Map<string, CallAnswer>();
-  if (candidates.length > 0) {
-    const state = fitState(messages, calls, resolved);
+  const textAnswers = new Map<string, TextAnswer>();
+  let textRequests = 0;
+  if (candidates.length > 0 || textAsked.length > 0) {
+    const state = fitState(messages, calls, resolved, blocks);
+    const entries = new Map(state.state.history.map(entry => [entry.i, entry]));
+    textAsked = textAsked.filter(block => {
+      const entry = entries.get(block.index);
+      const message = messages[block.index];
+      if (!message) { unrepresented.add(block.id); return false; }
+      const source = message.text.slice(block.start, block.end);
+      const preview = safeSlice(source, 0, Math.min(60, source.length));
+      const represented = entry !== undefined && entry.text.includes(preview) &&
+        (block.kind === 'reply' ? entry.text_block === block.id : entry.text.includes(`[${block.id}:`));
+      if (!represented) unrepresented.add(block.id);
+      return represented;
+    });
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
     const answered = await mapLimit(batches, MAX_CONCURRENT_REQUESTS, (batch) =>
       askBatch(asker, state.state, batch),
     );
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
+    const textBatches = batchItems(textAsked, textQuestionsFor, state.tokens, resolved);
+    textRequests = textBatches.length;
+    const answeredTexts = await mapLimit(textBatches, MAX_CONCURRENT_REQUESTS, async batch => {
+      const questions = Object.assign({}, ...batch.map(textQuestionsFor));
+      const response = await asker.ask(state.state, questions);
+      return batch.map(block => [block.id, { keep: noulAnswer(response.answers, `text_${block.id}`) }] as const);
+    });
+    for (const part of answeredTexts) for (const [id, answer] of part) textAnswers.set(id, answer);
   }
 
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
+  const textDecisions: TextDecision[] = blocks.map(block => {
+    const decision = decideText(block, textAnswers.get(block.id), resolved);
+    return unrepresented.has(block.id) ? { ...decision, reason: 'unrepresented' } : decision;
+  });
   const kept = applyDecisions(
-    messages,
+    applyTextDecisions(messages, blocks, textDecisions),
     decisions,
     calls,
     resolved.truncateHeadChars,
@@ -315,6 +366,7 @@ export async function compact(
   return {
     messages: kept,
     decisions,
+    textDecisions,
     stats: {
       messagesBefore: messages.length,
       messagesAfter: kept.length,
@@ -325,9 +377,14 @@ export async function compact(
       resultsDropped: count(decisions, 'result_dropped'),
       callsDropped: count(decisions, 'call_dropped'),
       pinned: count(decisions, 'pinned'),
+      texts: blocks.length,
+      textsRemoved: count(textDecisions, 'removed'),
+      duplicatesRemoved: count(textDecisions, 'duplicate'),
+      repliesAbridged: count(textDecisions, 'abridged'),
+      textsUnrepresented: unrepresented.size,
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,
-      requests: batches.length,
+      requests: batches.length + textRequests,
       ms: Date.now() - started,
     },
   };

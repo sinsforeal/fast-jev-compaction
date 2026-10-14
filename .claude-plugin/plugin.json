@@ -1,8 +1,9 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
+  "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
   "userConfig": {
     "apiKey": {
       "type": "string",
@@ -31,7 +32,7 @@
     "minReductionRatio": {
       "type": "number",
       "title": "Minimum reduction ratio",
-      "description": "Minimum estimated character reduction required to replace history.",
+      "description": "Minimum visible character reduction required to replace history; post-cut token target is checked separately.",
       "default": 0.25
     },
     "maxStateTokens": {
@@ -57,6 +58,30 @@
       "title": "Jev model",
       "description": "TypeSafe Jev model name.",
       "default": "jev-latest"
+    },
+    "injectedMinChars": {
+      "type": "number",
+      "title": "Injected text threshold",
+      "description": "Harness-shaped text at least this long is scored using structural recognition; 0 disables it. Untagged user text and fenced examples are preserved.",
+      "default": 1000
+    },
+    "replyMinChars": {
+      "type": "number",
+      "title": "Long reply threshold",
+      "description": "Old assistant replies at least this long may be abridged to their opening and closing; 0 disables it.",
+      "default": 2000
+    },
+    "maxPostCompactTokens": {
+      "type": "number",
+      "title": "Visible post-cut token target",
+      "description": "Fall back to built-in summary above this estimated visible conversation size; excludes system/tool prefix; 0 disables the target.",
+      "default": 80000
+    },
+    "logDecisions": {
+      "type": "boolean",
+      "title": "Log per-item decisions",
+      "description": "Opt-in diagnostics include kept and dropped call probabilities and text decisions. The outcome line is always logged.",
+      "default": false
     }
   }
 }

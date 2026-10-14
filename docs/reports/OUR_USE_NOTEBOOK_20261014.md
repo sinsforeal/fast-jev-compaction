@@ -8,9 +8,8 @@ access, no installed plugin edits, no settings edits or threshold change.
 
 ## Current stage
 
-Investigation of hook result application, opaque message handles, assistant
-response grouping, transcript persistence and visible-text size. Dependencies
-installed; baseline gates next. The supplied root Git metadata rejected worktree
+Implementation built; 62 Vitest cases, library and hook typechecks, and build pass.
+Pinned before-revision gates and independent review are next. The supplied root Git metadata rejected worktree
 creation, so this is an independent local clone inside the requested tmp/ root.
 The trading docs worktree cannot acquire its common-directory index lock either;
 its reports remain on disk for coordinator publication.
@@ -25,7 +24,23 @@ queued attachments. Runtime inspection is read-only on the installed executable.
 
 gh cannot read the user's config; public issues and PR patches retrieved using
 unauthenticated Node fetch, without reading or printing credentials. PRs 141 and
-146 are saved for review before adopting their concepts or code.
+146 were reviewed: text/state/types/test portions of PR 141 adapted with previews,
+stricter recognition and Unicode cuts; opt-in logging concept from PR 146 adapted.
+Current runtime independently verified by a read-only helper. Every retained handle
+can preserve stale parents and assistant IDs; every replacement now rebuilds all
+visible rows and groups adjacent parallel siblings. Speculative precompute is
+vetoed before any network/UI side effect. Queued deliveries are observed using a
+supplemental 2.1.299 contract; original full input goes to core on those cuts.
+
+Trading initial notebook commit failed acquiring the common index lock. External
+initial commit 666f5ef succeeded; its push failed because GitHub credentials are
+unavailable. GitHub connector confirms fork access but rejected branch creation:
+approval is required and this session's approval policy is never. No bypass tried.
+
+The first raw-transcript probe retained full rows and was stopped with Ctrl-C;
+no result from that attempt counts. The helper instead streamed count-only
+identity records. Broader current-transcript counts are distinct from the held
+study cutoff. Named debug files are absent, so historical triggers are not proven.
 
 ## Scratch
 

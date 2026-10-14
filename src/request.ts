@@ -1,4 +1,5 @@
 import type { JevAnswer, JevQuestions, JevResponse, JevState } from './types.js';
+import { wellFormed } from './unicode.js';
 
 export const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';
 export const DEFAULT_MODEL = 'jev-latest';
@@ -31,7 +32,7 @@ export function buildJevRequest(
       model: params.model ?? DEFAULT_MODEL,
       state,
       questions,
-    }),
+    }, (_key, value: unknown) => typeof value === 'string' ? wellFormed(value) : value),
   };
 }
 
@@ -102,7 +103,7 @@ export function noulAnswer(
     !answer ||
     !('noul' in answer) ||
     typeof answer.noul !== 'number' ||
-    !Number.isFinite(answer.noul)
+    !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1
   ) {
     throw new Error(`Invalid Jev answer for ${name}`);
   }
