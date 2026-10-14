@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.2 - 2026-10-14
+- Jev unavailable (transport or key failure): a hybrid session no longer cuts blind through the transcript recovery path; it skips, writes `prune_skipped.json` with the reason, counts `jev_unavailable`, and the handoff machine takes over at `handoffAt` and `handoffForceAt` (the User, 18:59). Other sessions keep the 0.4.4 recovery cut.
+
 ## 0.5.1 - 2026-10-14
 - The session gate also covers the post-cut target loop: `targetVisibleTokens` applies only in a hybrid session (`DISABLE_AUTO_COMPACT=1`); every other session keeps the 0.4.4 cut at `keepThreshold`, so one options block can serve all sessions.
 

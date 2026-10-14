@@ -552,6 +552,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       prepared = finalize(chosen);
     } catch (error) {
+      if (await hybridSession($)) {
+        // The User, 2026-10-14 18:59: with Jev unavailable the hybrid never cuts blind; it skips,
+        // marks the reason, and the handoff machine (system B) takes over at handoffAt/handoffForceAt.
+        const reason = `Jev unavailable (${recoveryReason(error)})`;
+        await notify($, `prune skipped (${reason}); no blind cut, the handoff takes over at ${configured.handoffAt}/${configured.handoffForceAt} tokens`);
+        await countFallback($, fallbackCounts, 'jev_unavailable', configured.logDecisions);
+        await writeSkipMarker($, configured, reason, estimateSessionTokens(projection));
+        return { skip: `${reason}; context left as it is, handoff takes over` };
+      }
       await log($, `Jev transcript recovery (${recoveryReason(error)})`);
       // Include deliveries that arrived while a failed request was in flight.
       input = ledger.prepare(projection, event.agentId);
