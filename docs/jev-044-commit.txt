@@ -1,1 +1,1 @@
-0.4.4: cover separate-row conflicts and normalized repeated-prompt reloads
+docs: record Jev 0.4.4 gates and independent review receipt
