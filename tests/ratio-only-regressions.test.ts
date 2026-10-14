@@ -68,6 +68,28 @@ it('044 hidden_only_without_anchor_is_placed', () => {
   expect(() => recoverApiHistory([api('hidden only')], rows, ledger)).not.toThrow();
   expect(ledger.prepare(rows).map(m => m.text)).toEqual(['hidden only', 'older']);
 });
+it('044 separate_api_row_conflict_never_duplicates_visible_prompts', () => {
+  const rows = [m('user', 'alpha'), m('user', 'beta')]; const ledger = new FidelityLedger();
+  expect(() => recoverApiHistory([api('beta first'), api('alpha second')], rows, ledger)).not.toThrow();
+  expect(ledger.prepare(rows).map(m => m.text)).toEqual(['alpha', ' second', 'beta', ' first']);
+  expect(ledger.takeNotes().join(' ')).toContain('text order conflict');
+});
+it('044 repeated_prompt_recovery_survives_four_normalized_reloads', async () => {
+  let rows: any[] = [m('user', 'go'), m('user', 'go'), m('user', 'go'), m('assistant', 'end')];
+  for (let round = 0; round < 4; round++) {
+    const h = harness({ minReductionRatio: -100 }); h.rows.splice(0, h.rows.length, ...rows);
+    const tail: any[] = round === 0 ? [api('go firstgo secondgo third'), { role: 'assistant', content: 'end' }] : [];
+    if (round > 0) for (const row of rows) {
+      if (row.role === 'user' && tail.at(-1)?.role === 'user') tail.at(-1).content += row.text;
+      else tail.push({ role: row.role, content: row.text });
+    }
+    h.$.session.messages = async args => args?.as === 'api' ? tail : rows;
+    rows = (await h.cut()).messages; expect(h.core).not.toHaveBeenCalled();
+    expect(rows.filter(m => m.text === 'go')).toHaveLength(3);
+    expect(rows.filter(m => [' first', ' second', ' third'].includes(m.text)).map(m => m.text)).toEqual([' first', ' second', ' third']);
+    expect(rows.filter(m => m.text.startsWith('[fast-jev-compaction pinned delivery provenance'))).toHaveLength(1);
+  }
+});
 for (const [name, fail] of [
   ['http_error', async () => ({ status: 500, ok: false, text: 'down' })],
   ['transport_error', async () => { throw new Error('network'); }],

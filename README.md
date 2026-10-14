@@ -201,7 +201,7 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fix/our-use-20261014'
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fidelity/jev-041-20261014'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -213,13 +213,12 @@ auto-compaction) goes through Jev: the toast reads
 when the hook returns a replacement, or `fallback to built-in summary (…)` when Jev
 does not meet the configured reduction ratio.
 
-The branch-qualified source above is the historical 0.4.1 release lane. The
-0.4.4 candidate is on `fidelity/jev-041-20261014`; Ryan v2 owns its installation
-under queue 0f83ff731638. This build does not promote the fork's
-default branch. For an existing declared source, preserve unrelated fields and
+The branch-qualified source above selects the 0.4.4 candidate without promoting
+the fork's default branch. Ryan v2 owns installation under queue 0f83ff731638.
+For an existing declared source, preserve unrelated fields and
 set its GitHub `repo` to `sinsforeal/fast-jev-compaction` and `ref` to
-`fix/our-use-20261014` before the add/update commands. Confirm both marketplace
-and cached plugin manifests say 0.4.1 before reloading. The 0.7 trial is unchanged.
+`fidelity/jev-041-20261014` before the add/update commands. Confirm both marketplace
+and cached plugin manifests say 0.4.4 before reloading. The 0.7 trial is unchanged.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

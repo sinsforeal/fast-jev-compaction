@@ -1,1 +1,1 @@
-0.4.4: resolve fidelity chronology and make reduction ratio the only summary fallback
+0.4.4: cover separate-row conflicts and normalized repeated-prompt reloads

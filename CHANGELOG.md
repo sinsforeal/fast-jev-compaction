@@ -24,8 +24,9 @@ This order supersedes the 0.4.1 fallback exceptions below.
   It logs incompatibility. The public host contract has no alternate transcript
   installer; compatible-runtime installation stays with Ryan's existing release
   queue 0f83ff731638. No fabricated setter or direct JSONL write is introduced.
-- All 15 new gates fail on pinned 38b2b03 and pass here. The full suite passes
-  120/120, with library/hook typechecks and build. Reproduction:
+- All 17 new gates fail on pinned 38b2b03 and pass here. The full suite passes
+  122/122, with library/hook typechecks, build and actual Claude manifest/hook
+  scanner validation. Reproduction:
   `python tools/jev_044_gates.py`. Existing fidelity gates explicitly isolate
   retention/order from the newly restored reduction policy.
 

@@ -64,7 +64,6 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
       low = following;
       while (low > 0 && projected[low - 1]!.role === 'user') low--;
     }
-    low = Math.max(low, transcriptCursor);
     const candidates = projected.flatMap((p, i) => i >= low && i < high && !consumed.has(i) && p.role === 'user' && p.text && text[j]!.includes(p.text) ? [i] : []);
     if (prior === undefined && following === undefined && !anchors[j]!.length &&
       candidates.map(i => projected[i]!.text).join('') !== text[j]) {
@@ -82,7 +81,7 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
         start = text[j]!.indexOf(p.text, start + 1);
       }
       if (start < 0) continue; // API contains fewer occurrences than the projection
-      if (start < previousStart) {
+      if (start < previousStart || index < transcriptCursor) {
         ledger.note(`API history row ${j}: text order conflict at projected row ${index}; transcript order retained`);
       }
       previousStart = start;
