@@ -12,8 +12,9 @@
 - Rebuild every retained row without its opaque handle. This prevents reused
   assistant IDs multiplying across resumes (#129) and stale parents bypassing
   the compact boundary (#145). Evidence: current runtime restores both through
-  handles; our full raw-transcript read finds 153,422 / 115,832 assistant IDs
-  reused across boundary segments. First cut after startup uses the built-in
+  handles; our full raw-transcript read finds 20,103 / 19,966 globally unique
+  assistant IDs reused across boundary segments (153,422 / 115,832 repeated
+  identity/segment occurrences). First cut after startup uses the built-in
   summary to establish a baseline for legacy resumed histories.
 - Combine consecutive assistant rows and adjacent pure result rows when rebuilding.
   Evidence: #137's partial parallel-call edit split one response and triggered
