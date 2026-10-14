@@ -315,9 +315,9 @@ async function getApiKey(
 }
 
 type LogHost = {
-  ui: { log: (text: string) => void; toast?: (text: string, options?: { timeoutMs?: number }) => void };
-  env?: { get: (name: string) => Promise<string | undefined> };
-  fs?: {
+  ui: { log: (text: string) => void; toast: (text: string, options?: { timeoutMs?: number }) => void };
+  env: { get: (name: string) => Promise<string | undefined> };
+  fs: {
     exists: (path: string) => Promise<boolean>;
     read: (path: string) => Promise<string>;
     write: (path: string, text: string) => Promise<void>;
@@ -333,7 +333,6 @@ const LOG_KEEP_CHARS = 512_000;
  * changes a cut. */
 async function appendLog($: LogHost, text: string): Promise<void> {
   try {
-    if (!$.fs || !$.env) return;
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
     if (!home) return;
     const path = `${home.replace(/[\\/]+$/, '')}/${LOG_FILE}`;
@@ -351,7 +350,7 @@ async function log($: LogHost, text: string): Promise<void> {
 
 async function notify($: LogHost, text: string): Promise<void> {
   $.ui.log(text);
-  $.ui.toast?.(text, { timeoutMs: 15_000 });
+  $.ui.toast(text, { timeoutMs: 15_000 });
   await appendLog($, text);
 }
 

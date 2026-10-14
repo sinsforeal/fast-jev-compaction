@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.3 - 2026-10-14
+
+Source: the User, 2026-10-14 11:58, on Ryan v2's 11:57 compaction (351,458 to 8,330 tokens, 69 s,
+built-in summary, no toast, no log line): "It seems like it triggered the normal compact. Check why
+jev didn't trigger."
+
+- 0.4.2 never loaded. Claude Code 2.1.299's hooks loader refused the module at the new
+  `$.ui.toast?.(text, ...)` call: "$.ui.toast is used as a value (an event of $ bound, passed or
+  read) instead of called; $ is always spelled $.noun.event(...) at the call site". A refused module
+  is no plugin: every compaction in both sessions since the 11:52 restarts went to the built-in
+  summarizer with nothing on screen and nothing on disk. Found with `claude -p ... --debug-file`.
+- `notify` calls `$.ui.toast(...)` plainly again; `appendLog` no longer reads `$.fs` or `$.env` as
+  values (a missing noun throws inside its own try and is swallowed, as before).
+- `tests/host-loader-contract.test.ts`: the hook sources may never optional-chain a call on an
+  event of `$` or read one as a value outside the 0.4.1 cast-then-call; fails before an install can.
+- Install receipt for any version from here on: a headless `claude -p` run with `--debug-file` must
+  show `hooks module fast-jev-compaction@fast-jev-compaction loaded`, never `failed to load`.
+
 ## 0.4.2 - 2026-10-14
 
 Source: the User, 2026-10-14 11:40, on Ryan v2's 11:08 compaction, which fell to the built-in summary
