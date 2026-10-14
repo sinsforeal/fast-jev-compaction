@@ -140,7 +140,7 @@ function machine() {
   const step = async (visible: number) => {
     const ctx: StepContext = { host, sessionId: SID, visible, log: async t => { logs.push(t); }, detach: w => { pending.push(w()); },
       config: { handoffAt: 250000, handoffForceAt: 300000, handoffDir: DIR, handoffSkillPath: 'docs/HANDOFF_SKILL.md' } };
-    await handoffStep(ctx); await Promise.all(pending.splice(0));
+    await handoffStep(ctx.host, ctx); await Promise.all(pending.splice(0));
   };
   const write = (body: string) => { now += 10; files.set(LATEST, body); mtimes.set(LATEST, now); };
   return { step, files, submits, runs, logs, store, write, tick: (n: number) => { now += n; }, failClear: (v: boolean) => { clearFails = v; } };

@@ -621,8 +621,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       try {
         let cwd: string | undefined;
         try { cwd = await $.session.cwd(); } catch { cwd = undefined; }
-        await handoffStep({
-          host: $ as unknown as HandoffHost, sessionId: sid, visible,
+        await handoffStep($ as unknown as HandoffHost, {
+          sessionId: sid, visible,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
             handoffDir: configured.handoffDir, handoffSkillPath: resolveSkillPath(cwd, configured.handoffSkillPath) },
           log: text => log($, text),

@@ -164,8 +164,8 @@ async function followSessionId(
 }
 
 /** One turn.complete step of the machine. Never throws into the caller. */
-export async function handoffStep(ctx: StepContext): Promise<void> {
-  const { host, sessionId, visible, config, log, detach } = ctx;
+export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'host'>): Promise<void> {
+  const { sessionId, visible, config, log, detach } = ctx;
   const dir = config.handoffDir;
   if (!dir) return;
   const latest = sessionFile(dir, sessionId, 'latest.md');
