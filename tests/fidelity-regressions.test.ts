@@ -18,7 +18,7 @@ function harness(options = {}) {
   const logs: string[] = [];
   const fetch = vi.fn(async (_url, init) => ({ status: 200, ok: true,
     text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 0 }])) }) }));
-  const $ = { env: { get: async () => undefined }, settings: { read: async () => ({}) },
+  const $ = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? '1' : undefined }, settings: { read: async () => ({}) },
     http: { fetch }, clock: { sleep: vi.fn(async () => {}) },
     ui: { log: (s: string) => logs.push(s), toast: vi.fn() }, session: { messages: async () => rows } };
   const core = vi.fn(async () => ({ messages: [m('user', 'summary')] }));

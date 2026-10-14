@@ -20,7 +20,7 @@ function harness(options = {}, unsupported = false) {
   const rows = history();
   const fetch = vi.fn(async (_url, init) => ({ status: 200, ok: true,
     text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 0 }])) }) }));
-  const $ = { env: { get: async () => 'F:/temp/jev-fixture' }, settings: { read: async () => ({}) },
+  const $ = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? '1' : 'F:/temp/jev-fixture' }, settings: { read: async () => ({}) },
     fs: { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '',
       write: async (p: string, text: string) => { files.set(p, text); } },
     http: { fetch }, clock: { sleep: async () => {} },

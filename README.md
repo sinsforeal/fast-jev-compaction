@@ -243,6 +243,7 @@ plugin's own token trigger go through Jev: the toast reads
 when the hook returns a replacement, or `[sid] skipped (…)` when Jev does not meet
 the configured reduction ratio. The built-in summary is never requested. Run with
 `DISABLE_AUTO_COMPACT=1` so the harness's own compaction stays out of the loop.
+The same variable is the plugin's session gate: without it the hook behaves as 0.4.4 did (percent trigger, a ratio miss falls through to the harness summary, no handoff orders), so installing 0.5.0 changes nothing in sessions that did not opt in.
 
 The branch-qualified source above selects the 0.5.0 candidate
 (`hybrid/handoff-20261014`) without promoting the fork's default branch. Ryan v2

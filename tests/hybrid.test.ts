@@ -63,12 +63,12 @@ describe('options', () => {
 
 // ---- hook: skip path, log prefix, trigger precedence --------------------------
 const SID = 'abcdef12-0000-4000-8000-000000000000';
-function harness(options = {}, tokens: number | undefined = 200000) {
+function harness(options = {}, tokens: number | undefined = 200000, hybrid = true) {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, ...options });
   const files = new Map<string, string>(); const logs: string[] = [];
   const rows = [m('user', 'task', { handle: 'u' }), m('assistant', 'fact'), m('user', 'continue')];
-  const $: any = { env: { get: async () => 'F:/temp/x' }, settings: { read: async () => ({}) },
+  const $: any = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? (hybrid ? '1' : undefined) : 'F:/temp/x' }, settings: { read: async () => ({}) },
     fs: { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '', write: async (p: string, t: string) => { files.set(p, t); } },
     http: { fetch: vi.fn(async (_u: string, init: any) => ({ status: 200, ok: true, text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 1 }])) }) })) },
     clock: { sleep: async () => {}, now: async () => 1000 }, ui: { log: (s: string) => logs.push(s), toast: vi.fn() },
@@ -118,6 +118,19 @@ describe('hook', () => {
     const c = harness({ compactAtTokens: 0, compactAtPercent: 50 }, 900000); c.$.session.usage = async () => ({ context: { tokens: 900000, percent: 90 } });
     await c.handlers['turn.complete'](c.$, {}, async (e: any) => e);
     expect(c.$.session.compact).toHaveBeenCalledTimes(1);
+  });
+  it('without DISABLE_AUTO_COMPACT=1 the hook keeps 0.4.4 behaviour: percent trigger, ratio miss falls through to next, no handoff', async () => {
+    const a = harness({ compactAtTokens: 150000, handoffDir: 'F:/handoffs' }, 300000, false);
+    await a.handlers['turn.complete'](a.$, {}, async (e: any) => e);
+    expect(a.$.session.compact).not.toHaveBeenCalled();
+    expect([...a.files.keys()].some(k => k.startsWith('F:/handoffs/'))).toBe(false);
+    const b = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs' }, 200000, false);
+    const next = vi.fn(async () => ({ summary: true }));
+    const out = await b.handlers['session.compact'](b.$, { trigger: 'auto', messages: b.rows }, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(out).toEqual({ summary: true });
+    expect(b.files.has(`F:/handoffs/${SID}/prune_skipped.json`)).toBe(false);
+    expect(b.logs.some(l => l.includes('fallback to built-in summary'))).toBe(true);
   });
 });
 

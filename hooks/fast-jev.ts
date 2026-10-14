@@ -34,7 +34,7 @@ import type {
 
 const HOOK_DEFAULTS = {
   compactAtPercent: 60,
-  compactAtTokens: 128_000,
+  compactAtTokens: 160_000,
   targetVisibleTokens: 64_000,
   handoffAt: 250_000,
   handoffForceAt: 300_000,
@@ -47,6 +47,18 @@ const HOOK_DEFAULTS = {
 
 /** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
+
+/**
+ * The hybrid (token trigger, skip on a ratio miss, handoff orders, clear and
+ * resume) runs only in a session whose launcher set DISABLE_AUTO_COMPACT=1:
+ * the harness compaction is off there, so this hook owns the context. In any
+ * other session the hook keeps the 0.4.4 behaviour: percent trigger, a ratio
+ * miss falls through to the harness summary, no handoff. One plugin cache and
+ * one options block serve all sessions; this switch keeps the test to one.
+ */
+async function hybridSession($: { env: { get(name: string): Promise<string | undefined> } }): Promise<boolean> {
+  try { return (await $.env.get('DISABLE_AUTO_COMPACT')) === '1'; } catch { return false; }
+}
 
 export type HookFetchInit = {
   method?: string;
@@ -492,7 +504,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let supportsCompaction = false;
   let lastPostCut: number | undefined;
   const notBefore = new Map<string, number>();
-  try { on('session.compact', async ($, event, _next) => {
+  try { on('session.compact', async ($, event, next) => {
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
@@ -561,9 +573,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (fit && !fit.reached) {
       await log($, `warn: unprunable floor ~${fit.achieved} tokens is above targetVisibleTokens ${configured.targetVisibleTokens}; best cut kept`);
     }
-    // 0.5.0: the built-in summary is never requested. A missed ratio leaves the context as it is.
+    // 0.5.0, hybrid session: the built-in summary is never requested; a missed ratio leaves the
+    // context as it is and the handoff machine takes over. Any other session keeps the 0.4.4
+    // fallback to the harness summary, which is the compaction that session still relies on.
     if (reductionRatio(result) < configured.minReductionRatio) {
       const reason = `reduction ${percent(reductionRatio(result))} below ${percent(configured.minReductionRatio)} minimum`;
+      if (!(await hybridSession($))) {
+        await notify($, `fallback to built-in summary (${reason}; harness compaction is on in this session)${fitNote}`);
+        await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
+        return next(event);
+      }
       await notify($, `prune skipped (${reason}); context left as it is, built-in summary not requested${fitNote}`);
       await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
       await writeSkipMarker($, configured, reason, post);
@@ -581,6 +600,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;
+    let hybrid = false;
     let visible: number | undefined;
     let sid: string | undefined;
     try {
@@ -588,9 +608,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
       try { sid = await $.session.id(); } catch { sid = undefined; }
       const tokens = context.tokens;
       visible = tokens;
+      hybrid = await hybridSession($);
       const hold = sid ? notBefore.get(sid) : undefined;
-      // compactAtTokens > 0 compares context.tokens; unset (0) or an unreadable count uses the percent path.
-      const due = configured.compactAtTokens > 0 && tokens !== undefined
+      // Hybrid session with compactAtTokens > 0: compare context.tokens. Any other session, an
+      // unset trigger (0) or an unreadable count: the 0.4.4 percent path.
+      const due = hybrid && configured.compactAtTokens > 0 && tokens !== undefined
         ? tokens >= configured.compactAtTokens
         : (context.percent ?? 0) >= configured.compactAtPercent;
       if (compacting || !due || (hold !== undefined && (tokens ?? 0) < hold)) { /* no prune this turn */ }
@@ -616,8 +638,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } finally {
       if (ownsCompaction) compacting = false;
     }
-    // Handoff machine: main loop, not after an interrupt, and only with a handoffDir.
-    if (configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
+    // Handoff machine: hybrid session, main loop, not after an interrupt, and only with a handoffDir.
+    if (hybrid && configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
       try {
         let cwd: string | undefined;
         try { cwd = await $.session.cwd(); } catch { cwd = undefined; }

@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.5.0 - 2026-10-14
+- Session gate: the hybrid (token trigger, skip on a ratio miss, handoff orders, clear and resume) runs only where the launcher set `DISABLE_AUTO_COMPACT=1`; any other session keeps the 0.4.4 behaviour (percent trigger, ratio miss falls through to the harness summary, no handoff). One plugin cache serves all sessions; this keeps the test to the one session that opted in.
 
 Source: the User, 17:54 to 18:22 local: the Claude Code auto-compaction is off
 entirely (`DISABLE_AUTO_COMPACT=1` on the launcher); the plugin alone manages

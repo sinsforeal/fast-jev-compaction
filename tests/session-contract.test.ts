@@ -17,7 +17,7 @@ function harness(options = {}) {
   const on = ((name: string, ...args: any[]) => { handlers[name] = args.at(-1); }) as any;
   register(on, { preserveRecentMessages: 1, apiKey: 'fixture', ...options });
   const logs: string[] = [];
-  const $ = { env: { get: async () => undefined }, settings: { read: async () => ({}) },
+  const $ = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? '1' : undefined }, settings: { read: async () => ({}) },
     http: { fetch: vi.fn(jevFetch) }, clock: { sleep: async () => {} },
     ui: { log: (text: string) => logs.push(text), toast: vi.fn() },
     session: { usage: vi.fn(async () => ({ context: { percent: 70 } })),
