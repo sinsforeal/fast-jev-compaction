@@ -124,13 +124,14 @@ describe('hook', () => {
     await a.handlers['turn.complete'](a.$, {}, async (e: any) => e);
     expect(a.$.session.compact).not.toHaveBeenCalled();
     expect([...a.files.keys()].some(k => k.startsWith('F:/handoffs/'))).toBe(false);
-    const b = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs' }, 200000, false);
+    const b = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs', targetVisibleTokens: 6000 }, 200000, false);
     const next = vi.fn(async () => ({ summary: true }));
     const out = await b.handlers['session.compact'](b.$, { trigger: 'auto', messages: b.rows }, next);
     expect(next).toHaveBeenCalledTimes(1);
     expect(out).toEqual({ summary: true });
     expect(b.files.has(`F:/handoffs/${SID}/prune_skipped.json`)).toBe(false);
     expect(b.logs.some(l => l.includes('fallback to built-in summary'))).toBe(true);
+    expect(b.logs.some(l => l.includes('target fit'))).toBe(false);
   });
 });
 

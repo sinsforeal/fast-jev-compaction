@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.1 - 2026-10-14
+- The session gate also covers the post-cut target loop: `targetVisibleTokens` applies only in a hybrid session (`DISABLE_AUTO_COMPACT=1`); every other session keeps the 0.4.4 cut at `keepThreshold`, so one options block can serve all sessions.
+
 ## 0.5.0 - 2026-10-14
 - Session gate: the hybrid (token trigger, skip on a ratio miss, handoff orders, clear and resume) runs only where the launcher set `DISABLE_AUTO_COMPACT=1`; any other session keeps the 0.4.4 behaviour (percent trigger, ratio miss falls through to the harness summary, no handoff). One plugin cache serves all sessions; this keeps the test to the one session that opted in.
 

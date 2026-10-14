@@ -545,7 +545,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
         };
       };
       let chosen = first;
-      if (configured.targetVisibleTokens > 0) {
+      // The target loop is part of the hybrid; other sessions keep the 0.4.4 cut at keepThreshold.
+      if (configured.targetVisibleTokens > 0 && await hybridSession($)) {
         fit = fitTarget(input, first, config, configured.targetVisibleTokens, scored => estimateSessionTokens(finalize(scored).messages));
         chosen = fit.result;
       }
