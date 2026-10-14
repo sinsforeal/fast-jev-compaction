@@ -68,8 +68,8 @@ The plugin declares these `userConfig` values in
 | `targetVisibleTokens` | `64000` |
 | `handoffAt` | `250000` |
 | `handoffForceAt` | `300000` |
-| `handoffDir` | `var/handoffs` (relative = per tree, resolved against the session cwd; absolute = shared) |
-| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` |
+| `handoffDir` | `var/handoffs` (relative = per tree, resolved once per session id against the cwd of the session's first event and cached, so a later `cd` never moves it; absolute = shared) |
+| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` (relative paths resolve like `handoffDir`) |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended

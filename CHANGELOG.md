@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.4 - 2026-10-14
+- The handoff root no longer follows the Bash tool's working directory. A relative `handoffDir` and `handoffSkillPath` resolve once per session id against the cwd seen on that session's first event (the launch cwd) and the root is cached; a later `cd` by the model cannot move `latest.md`, `resumed.json`, `current_session.json`, `prune_skipped.json` or the skill path (seen live 19:32: `var/handoffs/var/handoffs/...`, order re-issued). A changed cwd logs one line per session (`handoff root stays at the captured cwd ...`). A new session id (after `/clear`) captures again. Absolute values are unchanged.
+
 ## 0.5.3 - 2026-10-14
 - `handoffDir` resolves against the session working directory when relative (same rule as `handoffSkillPath`), through one helper, `resolveAgainstCwd`; an absolute value is used as given. Default is now `var/handoffs`, so each tree keeps its own store (one writer per store). Applies to the skip marker, the handoff step, `current_session.json` and the resumed/latest files.
 
