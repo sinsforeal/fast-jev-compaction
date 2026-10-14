@@ -63,16 +63,18 @@ describe('options', () => {
 
 // ---- hook: skip path, log prefix, trigger precedence --------------------------
 const SID = 'abcdef12-0000-4000-8000-000000000000';
-function harness(options = {}, tokens: number | undefined = 200000, hybrid = true, cwd?: string) {
+function harness(options = {}, tokens: number | undefined = 200000, hybrid = true, cwd?: string | (() => string), sid = SID) {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, ...options });
-  const files = new Map<string, string>(); const logs: string[] = [];
+  const files = new Map<string, string>(); const logs: string[] = []; const store = new Map<string, unknown>();
   const rows = [m('user', 'task', { handle: 'u' }), m('assistant', 'fact'), m('user', 'continue')];
   const $: any = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? (hybrid ? '1' : undefined) : 'F:/temp/x' }, settings: { read: async () => ({}) },
     fs: { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '', write: async (p: string, t: string) => { files.set(p, t); } },
     http: { fetch: vi.fn(async (_u: string, init: any) => ({ status: 200, ok: true, text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 1 }])) }) })) },
     clock: { sleep: async () => {}, now: async () => 1000 }, ui: { log: (s: string) => logs.push(s), toast: vi.fn() },
-    session: { id: async () => SID, cwd: async () => { if (cwd === undefined) throw new Error('no cwd'); return cwd; }, usage: vi.fn(async () => ({ context: { tokens, percent: 1 } })), messages: async () => rows, compact: vi.fn(async () => ({ messages: [] })) } };
+    store: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => { store.set(k, v); }, delete: async (k: string) => { store.delete(k); } },
+    prompt: { submit: vi.fn(async () => ({})) }, command: { run: vi.fn(async () => ({})), list: async () => [{ name: 'clear' }] },
+    session: { id: async () => (typeof sid === 'function' ? (sid as () => string)() : sid), cwd: async () => { if (cwd === undefined) throw new Error('no cwd'); return typeof cwd === 'function' ? cwd() : cwd; }, usage: vi.fn(async () => ({ context: { tokens, percent: 1 } })), messages: async () => rows, compact: vi.fn(async () => ({ messages: [] })) } };
   return { handlers, files, logs, $, rows };
 }
 describe('handoffDir resolution', () => {
@@ -91,6 +93,64 @@ describe('handoffDir resolution', () => {
     await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
     expect([...h.files.keys()]).toContain(`F:/handoffs/${SID}/prune_skipped.json`);
     expect([...h.files.keys()].some(k => k.startsWith('F:/tree_a'))).toBe(false);
+  });
+});
+describe('handoff root is captured once per session (0.5.4)', () => {
+  const OPTS = { minReductionRatio: 1, handoffForceAt: 100000, handoffAt: 90000 };
+  const compactOnce = (h: ReturnType<typeof harness>) => h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
+  const turn = async (h: ReturnType<typeof harness>) => { await h.handlers['turn.complete'](h.$, {}, async (e: any) => e); await new Promise(r => setTimeout(r, 5)); };
+  it('a cd between turns does not move the expected latest.md or the skip marker', async () => {
+    let cwd = 'F:/tree_a';
+    const h = harness(OPTS, 200000, true, () => cwd, 'aaaaaaaa-0000-4000-8000-00000000000a');
+    await turn(h);
+    cwd = 'F:/tree_a/var/handoffs';
+    await turn(h);
+    await compactOnce(h);
+    const want = 'F:/tree_a/var/handoffs/aaaaaaaa-0000-4000-8000-00000000000a/latest.md';
+    expect(h.logs.some(l => l.includes('handoff order NOW') && l.includes(`expecting ${want}`))).toBe(true);
+    expect(h.logs.some(l => l.includes('var/handoffs/var/handoffs'))).toBe(false);
+    const keys = [...h.files.keys()];
+    expect(keys).toContain('F:/tree_a/var/handoffs/aaaaaaaa-0000-4000-8000-00000000000a/prune_skipped.json');
+    expect(keys.some(k => k.includes('var/handoffs/var/handoffs'))).toBe(false);
+  });
+  it('the skill path stays on the captured root in the order text', async () => {
+    let cwd = 'F:/tree_s';
+    const h = harness(OPTS, 200000, true, () => cwd, 'bbbbbbbb-0000-4000-8000-00000000000b');
+    await turn(h);
+    cwd = 'F:/tree_s/docs';
+    await turn(h);
+    const texts = h.$.prompt.submit.mock.calls.map((c: any[]) => c[0].text);
+    expect(texts.length).toBeGreaterThan(0);
+    expect(texts.every((t: string) => t.includes('F:/tree_s/docs/HANDOFF_SKILL.md') && !t.includes('F:/tree_s/docs/docs'))).toBe(true);
+  });
+  it('a cwd that differs later logs one line, once per session', async () => {
+    let cwd = 'F:/tree_l';
+    const h = harness(OPTS, 200000, true, () => cwd, 'cccccccc-0000-4000-8000-00000000000c');
+    await turn(h);
+    cwd = 'F:/elsewhere';
+    await turn(h); await turn(h); await compactOnce(h);
+    const lines = h.logs.filter(l => l.includes('handoff root stays at the captured cwd'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('F:/tree_l');
+    expect(lines[0]).toContain('F:/elsewhere');
+  });
+  it('a new session id re-captures from its own first event', async () => {
+    let cwd = 'F:/tree_one'; let id = 'dddddddd-0000-4000-8000-00000000000d';
+    const h = harness(OPTS, 200000, true, () => cwd, (() => id) as any);
+    await turn(h);
+    id = 'eeeeeeee-0000-4000-8000-00000000000e'; cwd = 'F:/tree_two';
+    await turn(h);
+    const expects = h.logs.filter(l => l.includes('handoff order NOW')).map(l => /expecting (\S+)/.exec(l)![1]);
+    expect(expects).toEqual([
+      'F:/tree_one/var/handoffs/dddddddd-0000-4000-8000-00000000000d/latest.md',
+      'F:/tree_two/var/handoffs/eeeeeeee-0000-4000-8000-00000000000e/latest.md',
+    ]);
+  });
+  it('an absolute handoffDir is untouched and logs no drift line for itself', async () => {
+    let cwd = 'F:/tree_x';
+    const h = harness({ ...OPTS, handoffDir: 'F:/abs' }, 200000, true, () => cwd, 'ffffffff-0000-4000-8000-00000000000f');
+    await turn(h); cwd = 'F:/tree_y'; await turn(h);
+    expect(h.logs.some(l => l.includes('expecting F:/abs/ffffffff-0000-4000-8000-00000000000f/latest.md'))).toBe(true);
   });
 });
 describe('hook', () => {

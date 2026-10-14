@@ -451,24 +451,43 @@ type SkipHost = LogHost & {
 };
 
 /** `<handoffDir>/<sessionId>/prune_skipped.json`: { at, reason, tokens, estimate }. Never throws. */
-async function writeSkipMarker($: SkipHost, config: HookConfig, reason: string, estimate: number): Promise<void> {
+async function writeSkipMarker($: SkipHost, roots: HandoffRoots, config: HookConfig, reason: string, estimate: number): Promise<void> {
   if (!config.handoffDir) return;
   try {
     const id = await $.session.id();
     if (!id) return;
     let tokens: number | undefined;
     try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
-    await $.fs.write(sessionFile(await resolvedHandoffDir($, config.handoffDir), id, 'prune_skipped.json'),
+    await $.fs.write(sessionFile(await roots.resolve($, id, config.handoffDir), id, 'prune_skipped.json'),
       JSON.stringify({ at: new Date().toISOString(), reason, tokens: tokens ?? null, estimate }));
   } catch { /* a marker that cannot be written never changes a cut */ }
 }
 
-/** The one place the handoffDir option becomes a path: relative = per tree (session cwd), absolute = shared. */
-async function resolvedHandoffDir($: { session: { cwd: () => Promise<string> } }, dir: string): Promise<string> {
-  return resolveAgainstCwd(await resolvedCwd($), dir);
+/**
+ * The one place the handoffDir/handoffSkillPath options become paths: relative = per tree, absolute = shared.
+ * 0.5.4: a relative path joins the cwd seen on the FIRST event of the session id (the launch cwd);
+ * that root is cached per session id and a later `cd` by the model never moves it.
+ */
+type CwdHost = { session: { cwd: () => Promise<string> } };
+type HandoffRoots = { resolve: ($: CwdHost & LogHost, sid: string, path: string) => Promise<string> };
+function createHandoffRoots(): HandoffRoots {
+  const roots = new Map<string, string>();
+  const warned = new Set<string>();
+  return {
+    async resolve($, sid, path) {
+      const now = await resolvedCwd($);
+      const captured = roots.get(sid);
+      if (captured === undefined) { if (now !== undefined) roots.set(sid, now); return resolveAgainstCwd(now, path); }
+      if (now !== undefined && now !== captured && !warned.has(sid)) {
+        warned.add(sid);
+        await log($, `handoff root stays at the captured cwd ${captured} (session cwd is now ${now})`);
+      }
+      return resolveAgainstCwd(captured, path);
+    },
+  };
 }
 
-async function resolvedCwd($: { session: { cwd: () => Promise<string> } }): Promise<string | undefined> {
+async function resolvedCwd($: CwdHost): Promise<string | undefined> {
   try { return await $.session.cwd(); } catch { return undefined; }
 }
 
@@ -477,6 +496,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
   const ledger = new FidelityLedger();
   const fallbackCounts = new Map<string, number>();
+  const handoffRoots = createHandoffRoots();
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
       // All doors supply UUID chronology; only deliveries become pinned rows.
@@ -512,6 +532,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
+    // First event of a session id may be this one: capture the handoff root now (launch cwd).
+    try { const sid = await $.session.id(); if (sid) await handoffRoots.resolve($ as unknown as SkipHost, sid, '.'); } catch { /* capture only */ }
     let prepared: SessionCompaction;
     let fit: TargetFit | undefined;
     const projection = readPinProvenance(event.messages);
@@ -562,7 +584,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         const reason = `Jev unavailable (${recoveryReason(error)})`;
         await notify($, `prune skipped (${reason}); no blind cut, the handoff takes over at ${configured.handoffAt}/${configured.handoffForceAt} tokens`);
         await countFallback($, fallbackCounts, 'jev_unavailable', configured.logDecisions);
-        await writeSkipMarker($, configured, reason, estimateSessionTokens(projection));
+        await writeSkipMarker($, handoffRoots, configured, reason, estimateSessionTokens(projection));
         return { skip: `${reason}; context left as it is, handoff takes over` };
       }
       await log($, `Jev transcript recovery (${recoveryReason(error)})`);
@@ -599,7 +621,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       await notify($, `prune skipped (${reason}); context left as it is, built-in summary not requested${fitNote}`);
       await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
-      await writeSkipMarker($, configured, reason, post);
+      await writeSkipMarker($, handoffRoots, configured, reason, post);
       return { skip: `Jev ${reason}; context left as it is, built-in summary not requested` };
     }
     await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}${fitNote}; replacement prepared for ${event.trigger})`);
@@ -655,11 +677,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Handoff machine: hybrid session, main loop, not after an interrupt, and only with a handoffDir.
     if (hybrid && configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
       try {
-        const cwd = await resolvedCwd($);
         await handoffStep($ as unknown as HandoffHost, {
           sessionId: sid, visible,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
-            handoffDir: resolveAgainstCwd(cwd, configured.handoffDir), handoffSkillPath: resolveAgainstCwd(cwd, configured.handoffSkillPath) },
+            handoffDir: await handoffRoots.resolve($, sid, configured.handoffDir),
+            handoffSkillPath: await handoffRoots.resolve($, sid, configured.handoffSkillPath) },
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
         });
