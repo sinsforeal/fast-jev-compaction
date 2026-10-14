@@ -96,15 +96,17 @@ describe('applied versus speculative cuts and safe fallback', () => {
   });
 
   it('retains an unreconstructable row when core skips, and never retries a failed core', async () => {
-    // Adapted for 0.4.1 brief: only a demonstrated opaque row can require core.
+    // Adapted for 0.4.1 brief: only a demonstrated unreconstructable row can require core.
+    // 0.4.2: an opaque block no longer is one (noted, text kept); an observer that omitted
+    // the content blocks still is, so that is the row used here.
     const h = harness();
     await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque',
-      message: { type: 'attachment', content: [{ kind: 'block', index: 0 }] } }, async e => e);
+      message: { type: 'attachment' } }, async e => e);
     await h.handlers['session.compact'](h.$, h.event(), async () => ({ skip: 'blocked' }));
     await h.handlers['session.compact'](h.$, h.event(), h.core);
     expect(h.$.http.fetch).not.toHaveBeenCalled();
     await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque2',
-      message: { type: 'attachment', content: [{ kind: 'block', index: 0 }] } }, async e => e);
+      message: { type: 'attachment' } }, async e => e);
     const broken = vi.fn(async () => { throw new Error('core failed'); });
     await expect(h.handlers['session.compact'](h.$, h.event(), broken)).rejects.toThrow('core failed');
     expect(broken).toHaveBeenCalledTimes(1);

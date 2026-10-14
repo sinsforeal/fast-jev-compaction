@@ -126,14 +126,52 @@ it('041: multiple arrivals during a Jev request neither duplicate old pins nor r
   expect(out.messages.filter(m => ['first', 'second', 'third'].includes(m.text)).map(m => m.text)).toEqual(['first', 'second', 'third']);
   expect(out.messages.findIndex(m => m.text === 'third')).toBeLessThan(out.messages.findIndex(m => m.text === 'later fact'));
 });
-it('041: opaque deliveries require only that cut and preserve original event for core', async () => {
+it('042: an opaque delivery block is noted and dropped, its text kept, never a built-in summary', async () => {
+  // 0.4.2 (User 2026-10-14 11:40 "fix this now"): Ryan's 11:08 cut fell to the built-in summary on
+  // "delivery contains opaque blocks unsupported by handleless SessionMessage". The host projection
+  // already carries such a delivery as its text blocks; Jev carries the same and logs the drop.
   const h = harness({ logDecisions: true });
-  const appended = { door: 'delivery', uuid: 'opaque', message: { type: 'attachment', content: [{ kind: 'block', index: 0, type: 'image' }] } };
+  const appended = { door: 'delivery', uuid: 'opaque', message: { type: 'attachment',
+    content: [{ kind: 'text', text: 'relayed order' }, { kind: 'block', index: 1, type: 'image' }] } };
   const next = vi.fn(async e => e); await h.handlers['session.append'](h.$, appended, next);
   expect(next).toHaveBeenCalledWith(appended);
-  await h.cut(); expect(h.core.mock.calls[0][0].messages[0].handle).toBe('u');
-  expect(h.logs.some(s => s.startsWith('fallback ') && s.includes('opaque blocks'))).toBe(true);
-  await h.cut(); expect(h.core).toHaveBeenCalledTimes(1); expect(h.fetch).toHaveBeenCalled();
+  h.setRows([...history().slice(0, 4), m('user', 'relayed order', { handle: 'd' }), m('user', 'continue', { handle: 'last' })]);
+  const out = await h.cut();
+  expect(h.core).not.toHaveBeenCalled(); expect(h.fetch).toHaveBeenCalled();
+  expect(out.messages.filter(x => x.text === 'relayed order')).toHaveLength(1);
+  expect(h.logs.some(s => s.startsWith('fidelity: delivery opaque') && s.includes('1 opaque block(s) not carried handleless (image)'))).toBe(true);
+  expect(h.logs.some(s => s.startsWith('fallback '))).toBe(false);
+});
+it('042: a delivery of only opaque blocks pins nothing and still never summarizes', async () => {
+  const h = harness();
+  await h.handlers['session.append'](h.$, { door: 'delivery', uuid: 'opaque-only',
+    message: { type: 'attachment', content: [{ kind: 'block', index: 0, type: 'image' }] } }, async e => e);
+  const out = await h.cut();
+  expect(h.core).not.toHaveBeenCalled(); expect(out.messages.filter(x => x.text === '' && x.role === 'user' && !x.toolResults)).toHaveLength(0);
+  expect(h.logs.some(s => s.startsWith('fidelity: delivery opaque-only'))).toBe(true);
+});
+it('042: toasts and log lines are appended to ~/.claude/fast-jev-compaction.log', async () => {
+  const h = harness(); const files = new Map<string, string>();
+  (h.$ as any).env = { get: async (n: string) => n === 'USERPROFILE' ? 'C:\\Users\\x\\' : undefined };
+  (h.$ as any).fs = { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '',
+    write: async (p: string, t: string) => { files.set(p, t); } };
+  await h.cut();
+  const text = files.get('C:\\Users\\x/.claude/fast-jev-compaction.log') ?? '';
+  expect(text).toMatch(/kept \d+\/\d+ messages/);
+  expect(text.split('\n').filter(Boolean).every(l => /^\d{4}-\d{2}-\d{2}T/.test(l))).toBe(true);
+  h.fetch.mockImplementation(async () => ({ status: 500, ok: false, text: 'down' }));
+  await h.cut();
+  const after = files.get('C:\\Users\\x/.claude/fast-jev-compaction.log') ?? '';
+  expect(after.startsWith(text)).toBe(true);
+  expect(after).toContain('fallback to built-in summary');
+});
+it('042: a log write failure never changes the cut', async () => {
+  const h = harness();
+  (h.$ as any).env = { get: async () => 'C:/Users/x' };
+  (h.$ as any).fs = { exists: async () => { throw new Error('EACCES'); }, read: async () => { throw new Error('EACCES'); },
+    write: async () => { throw new Error('EACCES'); } };
+  const out = await h.cut();
+  expect(h.core).not.toHaveBeenCalled(); expect(out.messages.length).toBeGreaterThan(0);
 });
 it('041: malformed answer primitives use the invalid-result fallback, never an unclassified skip', async () => {
   const h = harness({ logDecisions: true });
@@ -226,12 +264,13 @@ it('041: API hidden text in the same user block as the prompt is kept verbatim',
   const out = await h.cut(); expect(out.messages.filter(m => m.text === hidden)).toHaveLength(1);
   expect(out.messages.filter(m => m.text === 'task')).toHaveLength(1); expect(h.core).not.toHaveBeenCalled();
 });
-it('041: proven opaque legacy API content logs only that cut reason', async () => {
+it('042: opaque legacy API content is noted, its text kept, never a fallback', async () => {
   const h = harness(); const api = apiHistory(''); api[0].content.push({ type: 'image', source: { type: 'base64', data: 'fixture' } } as any);
   h.$.session.messages = async (args?: any) => args?.as === 'api' ? api as any : history();
-  await h.cut(); expect(h.logs.some(s => s.startsWith('fallback ') && s.includes('API history contains opaque'))).toBe(true);
-  h.$.session.messages = async () => history(); await h.cut();
-  expect(h.core).toHaveBeenCalledTimes(1); expect(h.fetch).toHaveBeenCalled();
+  await h.cut();
+  expect(h.logs.some(s => s.startsWith('fidelity: API history row') && s.includes('opaque user block(s) not carried handleless (image)'))).toBe(true);
+  expect(h.logs.some(s => s.startsWith('fallback '))).toBe(false);
+  expect(h.core).not.toHaveBeenCalled(); expect(h.fetch).toHaveBeenCalled();
 });
 
 it('041: fully visible equal prompts merged by the API never trigger a hidden-text fallback', async () => {

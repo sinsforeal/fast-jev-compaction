@@ -314,17 +314,45 @@ async function getApiKey(
   return undefined;
 }
 
-function notify(
-  $: {
-    ui: {
-      log: (text: string) => void;
-      toast: (text: string, options?: { timeoutMs?: number }) => void;
-    };
-  },
-  text: string,
-): void {
+type LogHost = {
+  ui: { log: (text: string) => void; toast?: (text: string, options?: { timeoutMs?: number }) => void };
+  env?: { get: (name: string) => Promise<string | undefined> };
+  fs?: {
+    exists: (path: string) => Promise<boolean>;
+    read: (path: string) => Promise<string>;
+    write: (path: string, text: string) => Promise<void>;
+  };
+};
+const LOG_FILE = '.claude/fast-jev-compaction.log';
+const LOG_KEEP_CHARS = 512_000;
+
+/** 0.4.2: every toast and log line also lands on disk, under the user's home
+ * (`~/.claude/fast-jev-compaction.log`), so a fallback reason or a kept cut can be
+ * read back after the toast is gone. The host exposes `fs.write` only (no append):
+ * read, trim to the newest half once over the cap, write. Never throws, never
+ * changes a cut. */
+async function appendLog($: LogHost, text: string): Promise<void> {
+  try {
+    if (!$.fs || !$.env) return;
+    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
+    if (!home) return;
+    const path = `${home.replace(/[\\/]+$/, '')}/${LOG_FILE}`;
+    let prior = '';
+    try { if (await $.fs.exists(path)) prior = await $.fs.read(path); } catch { prior = ''; }
+    if (prior.length > LOG_KEEP_CHARS) prior = prior.slice(prior.length - LOG_KEEP_CHARS / 2);
+    await $.fs.write(path, `${prior}${new Date().toISOString()} ${text}\n`);
+  } catch { /* a log that cannot be written never changes a cut */ }
+}
+
+async function log($: LogHost, text: string): Promise<void> {
   $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
+  await appendLog($, text);
+}
+
+async function notify($: LogHost, text: string): Promise<void> {
+  $.ui.log(text);
+  $.ui.toast?.(text, { timeoutMs: 15_000 });
+  await appendLog($, text);
 }
 
 function countFallback(
@@ -374,7 +402,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
     const fallback = async (code: string, reason: string) => {
-      notify($, `fallback to built-in summary (${reason})`);
+      await notify($, `fallback to built-in summary (${reason})`);
       countFallback($, fallbackCounts, code, configured.logDecisions);
       const checkpoint = ledger.checkpoint();
       const result = await next(event); // keep the original handles for core
@@ -393,6 +421,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); } catch { /* optional host capability */ }
       recoverApiHistory(apiHistory, projection, ledger, event.agentId, pinProvenanceTexts(event.messages));
       const input = ledger.prepare(projection, event.agentId);
+      for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
       if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
       const asker = jevAsker(async (url, init) => {
           const response = await $.http.fetch(url, init);
@@ -413,19 +442,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (error instanceof JevRequestError) return fallback('request_failure', error.message);
       if (error instanceof JevResultError) return fallback('invalid_engine_result', 'invalid or out-of-range Jev engine result');
       // Local state-budget/preparation refusal must not turn Jev into a summary.
-      notify($, 'Jev cut skipped (local preparation failed; history unchanged; details omitted)');
+      await notify($, 'Jev cut skipped (local preparation failed; history unchanged; details omitted)');
       return { skip: 'Jev local preparation failed; history unchanged' };
     }
     const { result, messages } = prepared;
-    if (configured.logDecisions) for (const line of decisionLogLines(result)) $.ui.log(line);
+    if (configured.logDecisions) for (const line of decisionLogLines(result)) await log($, line);
     const post = estimateSessionTokens(messages);
     if (configured.maxPostCompactTokens > 0 && post > configured.maxPostCompactTokens) {
-      $.ui.log(`warn: estimated visible post-cut ~${post} tokens exceeds target ${configured.maxPostCompactTokens}; Jev replacement retained`);
+      await log($, `warn: estimated visible post-cut ~${post} tokens exceeds target ${configured.maxPostCompactTokens}; Jev replacement retained`);
     }
     if (reductionRatio(result) < configured.minReductionRatio) {
-      $.ui.log(`warn: reduction below ${percent(configured.minReductionRatio)} report threshold; Jev replacement retained`);
+      await log($, `warn: reduction below ${percent(configured.minReductionRatio)} report threshold; Jev replacement retained`);
     }
-    notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
+    await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
     ledger.rebase(result.messages, event.agentId);
     return { messages };
   }); supportsCompaction = true; } catch {
@@ -442,17 +471,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
       compacting = true;
       ownsCompaction = true;
       if (!supportsCompaction) {
-        notify($, 'fallback to built-in summary (host has no session.compact event)');
+        await notify($, 'fallback to built-in summary (host has no session.compact event)');
         countFallback($, fallbackCounts, 'host_without_compaction_event', configured.logDecisions);
       }
       const outcome = await $.session.compact();
       if (outcome.skip === undefined && outcome.tokensAfter !== undefined) {
-        $.ui.log(`applied compaction: ${outcome.tokensBefore ?? '?'} -> ${outcome.tokensAfter} tokens (engine measurement)`);
+        await log($, `applied compaction: ${outcome.tokensBefore ?? '?'} -> ${outcome.tokensAfter} tokens (engine measurement)`);
       }
     } catch (error) {
-      $.ui.log(
-        'auto-compact skipped (engine rejected the request; details omitted)',
-      );
+      await log($, 'auto-compact skipped (engine rejected the request; details omitted)');
     } finally {
       if (ownsCompaction) compacting = false;
     }

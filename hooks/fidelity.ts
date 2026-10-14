@@ -23,6 +23,12 @@ export class FidelityLedger {
   private sequence = 0;
   private rows: RecordRow[] = [];
   private timeline: { uuid: string; scope?: string; sequence: number }[] = [];
+  private notes: string[] = [];
+
+  /** Add a fidelity note for the next log flush (0.4.2). Fixed wording only, never message content. */
+  note(text: string): void { this.notes.push(text); }
+  /** Drain the fidelity notes accumulated since the last flush. */
+  takeNotes(): string[] { const out = this.notes; this.notes = []; return out; }
 
   checkpoint(): number { return this.serial; }
   position(): number { return this.sequence; }
@@ -32,10 +38,18 @@ export class FidelityLedger {
     this.timeline.push({ uuid: event.uuid, scope: event.agentId, sequence });
     if (event.door !== 'delivery') return;
     const content = event.message.content;
-    const problem = !content ? 'delivery observer omitted content blocks' :
-      content.some(b => b.kind !== 'text' || typeof b.text !== 'string') ?
-        'delivery contains opaque blocks unsupported by handleless SessionMessage' : undefined;
-    const text = problem ? undefined : content!.map(b => b.text!).join('');
+    const problem = !content ? 'delivery observer omitted content blocks' : undefined;
+    // 0.4.2: an opaque block (an image, a non-text attachment block) cannot ride a
+    // handleless SessionMessage. The host's own projection already carries such a
+    // delivery as its text blocks joined; carry exactly that, note the dropped kinds
+    // for the log, and never spend the whole cut on a built-in summary for it.
+    const opaque = content ? content.filter(b => b.kind !== 'text' || typeof b.text !== 'string')
+      .map(b => { const t = (b as { type?: unknown }).type; return typeof t === 'string' ? t : String(b.kind ?? 'unknown'); }) : [];
+    const text = problem ? undefined : content!.map(b => (b.kind === 'text' && typeof b.text === 'string') ? b.text : '').join('');
+    if (opaque.length) {
+      this.notes.push(`delivery ${event.uuid}${event.agentId ? ` (agent ${event.agentId})` : ''}: ${opaque.length} opaque block(s) not carried handleless (${[...new Set(opaque)].join(', ')}); text blocks kept verbatim`);
+      if (text === '') return; // nothing reconstructable here; the host projection holds the same
+    }
     // prompt.submit can settle before the queue is delivered. Upgrade exactly
     // one pending submission group when the canonical queued-command arrives.
     // Scope, provenance, whole prompt and every context block must all agree.

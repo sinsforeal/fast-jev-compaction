@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.2 - 2026-10-14
+
+Source: the User, 2026-10-14 11:40, on Ryan v2's 11:08 compaction, which fell to the built-in summary
+with the toast "fallback to built-in summary (delivery contains opaque blocks unsupported by
+handleless SessionMessage)": "fix this now", and 11:38 "I also need the jev toast to be put on disk
+correctly so the next restart catches it."
+
+- An opaque block inside a delivery (an image or any non-text attachment block) or inside a legacy
+  API history user row is no longer an unreconstructable delivery. The host's own projection carries
+  such a row as its text blocks joined; Jev now carries exactly that, pins it as before, and writes a
+  fidelity note naming the dropped block kinds. A delivery with no text at all pins nothing. The cut
+  proceeds; no built-in summary is spent on it. `unreconstructable_delivery` remains for an observer
+  that omitted the content blocks and for unprovable chronology.
+- Every toast and `$.ui.log` line (fallback reasons, fidelity notes, warnings, the kept-cut line,
+  applied-compaction measurements, decision logs) is also appended to
+  `~/.claude/fast-jev-compaction.log` (USERPROFILE, then HOME), ISO timestamp first, through the
+  host's `fs` (read, trim to the newest 256k characters once over 512k, write). A log that cannot be
+  written never changes a cut.
+- Tests: the two 0.4.1 opaque-row tests are replaced by their 0.4.2 counterparts (noted and kept, no
+  fallback), one test for the log file and one for a failing log write; the core-required contract test
+  uses an omitted-content delivery, the row class that still requires core.
+
 ## 0.4.1 - 2026-10-14
 
 Source for every change below: Ryan v2's **Jev fork 0.4.1 fidelity brief**, written

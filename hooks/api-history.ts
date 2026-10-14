@@ -44,8 +44,11 @@ export function recoverApiHistory(value: unknown, projected: readonly SessionMes
     const m = api[j]!;
     if (m.role !== 'user') continue;
     const blocks = typeof m.content === 'string' ? [] : m.content;
-    if (blocks.some(b => b.type !== 'text' && b.type !== 'tool_result')) {
-      throw new FidelityError('API history contains opaque user blocks unsupported by handleless SessionMessage');
+    const opaque = blocks.filter(b => b.type !== 'text' && b.type !== 'tool_result').map(b => b.type);
+    if (opaque.length) {
+      // 0.4.2: the text of the row is already what the projection carries; an
+      // opaque user block (an image) is noted and dropped, never a built-in summary.
+      ledger.note(`API history row ${j}: ${opaque.length} opaque user block(s) not carried handleless (${[...new Set(opaque)].join(', ')}); text kept`);
     }
     if (!text[j]) continue;
     if (isPinProvenance(text[j]!)) continue;
