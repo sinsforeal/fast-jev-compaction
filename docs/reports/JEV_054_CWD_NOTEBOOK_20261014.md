@@ -26,4 +26,6 @@ Model: Sonnet 5.5. Worktree tmp/wt_jev_cwd, branch fix/handoff-cwd-20261014 from
 
 ## Stage
 
-Code and tests committed and pushed. Version bump, CHANGELOG, README committed after. Install of 0.5.4 and live check are the orchestrator's.
+19:52 Clear-seed gap closed: `HandoffRoots.seed(from, to)` (fast-jev.ts), called from `followSessionId` (handoff.ts) through new optional `StepContext.onIdChanged` when the id changed; new id keeps the old root unless it already has one. Test in tests/hybrid.test.ts. vitest 145 passed, typecheck clean. Did not prove the new test red on the old code (hook forbids stash). The seam needed no restructuring.
+
+Earlier: code and tests committed and pushed. Version bump, CHANGELOG, README committed after. Install of 0.5.4 and live check are the orchestrator's.

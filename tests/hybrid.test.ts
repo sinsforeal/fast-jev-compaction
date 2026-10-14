@@ -146,6 +146,24 @@ describe('handoff root is captured once per session (0.5.4)', () => {
       'F:/tree_two/var/handoffs/eeeeeeee-0000-4000-8000-00000000000e/latest.md',
     ]);
   });
+  it('after the clear changes the id, the new id keeps the old id root even if the cwd drifted', async () => {
+    const OLD = 'a0a0a0a0-0000-4000-8000-0000000000a0'; const NEW = 'b1b1b1b1-0000-4000-8000-0000000000b1';
+    let cwd = 'F:/tree_a'; let id = OLD;
+    const h = harness(OPTS, 200000, true, () => cwd, (() => id) as any);
+    h.$.fs.stat = async () => ({ kind: 'file', size: 1, mtimeMs: 5000 });
+    h.$.command.run = vi.fn(async () => { id = NEW; cwd = 'F:/tree_b/drift'; return {}; });
+    await turn(h); // first event of OLD: root captured at A, NOW order sent
+    h.files.set(`F:/tree_a/var/handoffs/${OLD}/latest.md`, `# Handoff for session ${OLD}\nbody\nCOMPLETE\n`);
+    await turn(h); // complete file: clear, id changes, cwd drifts to B
+    expect(h.$.command.run).toHaveBeenCalledTimes(1);
+    const cur = JSON.parse(h.files.get('F:/tree_a/var/handoffs/current_session.json')!);
+    expect(cur).toMatchObject({ id: NEW, previous_id: OLD });
+    expect(h.files.has(`F:/tree_a/var/handoffs/${NEW}/latest.md`)).toBe(true);
+    await turn(h); // first turn of NEW, cwd still B
+    const expects = h.logs.filter(l => l.includes('handoff order NOW')).map(l => /expecting (\S+)/.exec(l)![1]);
+    expect(expects.at(-1)).toBe(`F:/tree_a/var/handoffs/${NEW}/latest.md`);
+    expect([...h.files.keys()].some(k => k.startsWith('F:/tree_b'))).toBe(false);
+  });
   it('an absolute handoffDir is untouched and logs no drift line for itself', async () => {
     let cwd = 'F:/tree_x';
     const h = harness({ ...OPTS, handoffDir: 'F:/abs' }, 200000, true, () => cwd, 'ffffffff-0000-4000-8000-00000000000f');

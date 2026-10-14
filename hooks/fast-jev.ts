@@ -469,11 +469,19 @@ async function writeSkipMarker($: SkipHost, roots: HandoffRoots, config: HookCon
  * that root is cached per session id and a later `cd` by the model never moves it.
  */
 type CwdHost = { session: { cwd: () => Promise<string> } };
-type HandoffRoots = { resolve: ($: CwdHost & LogHost, sid: string, path: string) => Promise<string> };
+type HandoffRoots = {
+  resolve: ($: CwdHost & LogHost, sid: string, path: string) => Promise<string>;
+  /** After a clear changed the id: the new id inherits the old id's root unless it already has one. */
+  seed: (from: string, to: string) => void;
+};
 function createHandoffRoots(): HandoffRoots {
   const roots = new Map<string, string>();
   const warned = new Set<string>();
   return {
+    seed(from, to) {
+      const root = roots.get(from);
+      if (root !== undefined && !roots.has(to)) roots.set(to, root);
+    },
     async resolve($, sid, path) {
       const now = await resolvedCwd($);
       const captured = roots.get(sid);
@@ -684,6 +692,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
             handoffSkillPath: await handoffRoots.resolve($, sid, configured.handoffSkillPath) },
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
+          onIdChanged: (previous, id) => handoffRoots.seed(previous, id),
         });
       } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }

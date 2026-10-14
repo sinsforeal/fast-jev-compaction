@@ -115,6 +115,8 @@ export type StepContext = {
   log: (text: string) => Promise<void>;
   /** Runs work after the hook has returned; errors are the work's own to log. */
   detach: (work: () => Promise<void>) => void;
+  /** Called when the clear changed the session id, before the files are copied (0.5.4: seeds the new id's handoff root). */
+  onIdChanged?: (previous: string, id: string) => void;
 };
 
 async function load(host: HandoffHost, sessionId: string): Promise<HandoffState> {
@@ -149,10 +151,12 @@ async function clearAvailable(host: HandoffHost): Promise<boolean> {
  */
 async function followSessionId(
   host: HandoffHost, dir: string, previous: string, latest: string, log: (text: string) => Promise<void>,
+  onIdChanged?: (previous: string, id: string) => void,
 ): Promise<void> {
   try {
     const id = await host.session.id();
     if (id !== previous) {
+      try { onIdChanged?.(previous, id); } catch { /* the seed is a convenience; the copy goes on */ }
       for (const name of ['latest.md', 'resumed.json']) {
         const from = sessionFile(dir, previous, name);
         try { await host.fs.write(sessionFile(dir, id, name), await host.fs.read(from)); }
@@ -204,7 +208,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}); will retry on the next turn`);
           return;
         }
-        await followSessionId(host, dir, sessionId, latest, log);
+        await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
         await log('handoff cleared the session; submitting the resume order');
         try {
           await host.prompt.submit({ text: resumeOrder(latest, config) });
