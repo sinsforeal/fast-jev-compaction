@@ -15,12 +15,18 @@ export type RuntimeMessages = (args: { agentId?: string; as: 'api' }) => Promise
  * text/tool IDs. Never replace the whole history with the bounded API tail.
  */
 export function recoverApiHistory(value: unknown, projected: readonly SessionMessage[], ledger: FidelityLedger,
-  scope?: string): void {
+  scope?: string, provenance: readonly string[] = []): void {
   if (!Array.isArray(value) || !value.every(m => m && 'content' in m)) return; // older host/projection fixture
   const api = value as ApiHistoryMessage[];
   const uses = new Map(projected.flatMap((m, i) => m.toolUses.map(t => [t.tool_use_id, i] as const)));
   const results = new Map(projected.flatMap((m, i) => (m.toolResults ?? []).map(t => [t.tool_use_id, i] as const)));
-  const text = api.map(m => typeof m.content === 'string' ? m.content : m.content.filter(b => b.type === 'text').map(b => b.text ?? '').join(''));
+  const text = api.map(m => {
+    let value = typeof m.content === 'string' ? m.content : m.content.filter(b => b.type === 'text').map(b => b.text ?? '').join('');
+    // Actual API normalization can merge a provenance row with an adjacent
+    // user prompt. Remove only exact metadata already verified in the projection.
+    for (const marker of provenance) value = value.replace(marker, '');
+    return value;
+  });
   const anchors = api.map((m, j) => {
     const blocks = typeof m.content === 'string' ? [] : m.content;
     const ids = blocks.flatMap(b => {

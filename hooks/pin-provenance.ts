@@ -23,6 +23,9 @@ function parse(text: string): Pin[] | undefined {
   } catch { return undefined; }
 }
 export function isPinProvenance(text: string): boolean { return parse(text) !== undefined; }
+export function pinProvenanceTexts(input: readonly SessionMessage[]): string[] {
+  return input.filter(m => m.role === 'user' && isPinProvenance(m.text)).map(m => m.text);
+}
 
 export function readPinProvenance(input: readonly SessionMessage[]): (SessionMessage & Message)[] {
   const entries = input.flatMap(m => m.role === 'user' ? (parse(m.text) ?? []) : []);

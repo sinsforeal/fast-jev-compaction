@@ -10,11 +10,13 @@ Write connector tested offline; content uses patch editor, no shell heredoc.
 
 ## Current stage
 
-Implementation and 99 tests green; typecheck/build green. Version/docs updated to 0.4.1.
+Implementation and 100 tests green; typecheck/build green. Version/docs updated to 0.4.1.
 Before evidence: initial nine new tests fail by assertion on clean 4cc723a.
-All 25 initial expanded fidelity gates fail on pinned 4cc723a; final 29-gate
-receipt follows. Actual 2.1.299 manifest/hook scanner passes in isolated config.
-First implementation committed/pushed at b75d344; independent re-review in progress.
+All 29 expanded fidelity gates fail on pinned 4cc723a; final 30-gate receipt
+follows. Actual 2.1.299 manifest/hook scanner passes in isolated config.
+Implementation commits b75d344, 6a4833c and LF correction 6887253 pushed.
+Independent reviewer accepted the final merged-provenance correction and ran
+30/30 fidelity gates; final receipts and trading report publication follow.
 
 ## Findings, attempts and failures
 
@@ -53,6 +55,11 @@ specific exception. The host scanner first rejected a nested counter helper that
 received `$`; moved it to a declared top-level helper, scanner now green.
 The baseline junction attempt required an absolute target; no junction was made,
 and baseline tests resolved the parent worktree dependencies successfully.
+Final review added actual adjacent-user API normalization to the four-registration
+fixture. API recovery removes only exact provenance metadata already verified in
+the original projection, so the metadata never becomes a new hidden delivery.
+100/100 full-suite gates pass; original instructions and one provenance row remain.
+Outcome estimate includes the provenance row, matching the warning measurement.
 
 ## Scratch and stop plan
 

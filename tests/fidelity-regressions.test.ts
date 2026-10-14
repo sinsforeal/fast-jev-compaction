@@ -272,3 +272,22 @@ it('041: additional hidden API text without a chronology anchor uses a specific 
   await h.cut(); expect(h.logs.some(s => s.includes('API hidden-text chronology has no observable anchor'))).toBe(true);
   h.$.session.messages = async () => [m('user', 'task')]; await h.cut(); expect(h.core).toHaveBeenCalledTimes(1);
 });
+
+it('041: actual API adjacent-user normalization never duplicates provenance on reload', async () => {
+  const hidden = '<system-reminder>' + 'normalized exact instruction '.repeat(120) + '</system-reminder>';
+  const initial = harness(); initial.$.session.messages = async (args?: any) => args?.as === 'api' ? apiHistory(hidden) as any : history();
+  let rows = (await initial.cut()).messages;
+  for (let round = 0; round < 4; round++) {
+    const resumed = harness(); resumed.setRows(rows);
+    const api: any[] = [];
+    for (const row of rows) {
+      const last = api.at(-1);
+      if (row.role === 'user' && last?.role === 'user') last.content[0].text += row.text;
+      else api.push({ role: row.role, content: [{ type: 'text', text: row.text }] });
+    }
+    resumed.$.session.messages = async (args?: any) => args?.as === 'api' ? api as any : rows;
+    rows = (await resumed.cut()).messages;
+    expect(resumed.core).not.toHaveBeenCalled(); expect(rows.filter(m => m.text === hidden)).toHaveLength(1);
+    expect(rows.filter(m => m.text.startsWith('[fast-jev-compaction pinned delivery provenance'))).toHaveLength(1);
+  }
+});

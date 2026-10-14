@@ -13,7 +13,7 @@ import { estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger, FidelityError } from './fidelity.js';
 import { recoverApiHistory, type RuntimeMessages } from './api-history.js';
-import { readPinProvenance, persistPinProvenance } from './pin-provenance.js';
+import { readPinProvenance, persistPinProvenance, pinProvenanceTexts } from './pin-provenance.js';
 import {
   buildJevRequest,
   DEFAULT_MODEL,
@@ -242,7 +242,7 @@ function percent(ratio: number): string {
   return `${Math.round(ratio * 100)}%`;
 }
 
-export function summarize(result: CompactResult): string {
+export function summarize(result: CompactResult, visiblePost = estimateSessionTokens(result.messages)): string {
   const { stats } = result;
   const parts = [
     stats.kept > 0 ? `${stats.kept} kept` : '',
@@ -255,7 +255,7 @@ export function summarize(result: CompactResult): string {
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
-  }; estimated visible post-cut ~${estimateSessionTokens(result.messages)} tokens; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
+  }; estimated visible post-cut ~${visiblePost} tokens; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
 }
 
 const UI_LOG_MAX_CHARS = 4096;
@@ -391,7 +391,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // the observer path, never a blanket startup summary.
       let apiHistory: unknown;
       try { apiHistory = await ($.session.messages as unknown as RuntimeMessages)({ as: 'api', agentId: event.agentId }); } catch { /* optional host capability */ }
-      recoverApiHistory(apiHistory, projection, ledger, event.agentId);
+      recoverApiHistory(apiHistory, projection, ledger, event.agentId, pinProvenanceTexts(event.messages));
       const input = ledger.prepare(projection, event.agentId);
       if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
       const asker = jevAsker(async (url, init) => {
@@ -425,7 +425,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (reductionRatio(result) < configured.minReductionRatio) {
       $.ui.log(`warn: reduction below ${percent(configured.minReductionRatio)} report threshold; Jev replacement retained`);
     }
-    notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
+    notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}; replacement prepared for ${event.trigger})`);
     ledger.rebase(result.messages, event.agentId);
     return { messages };
   }); supportsCompaction = true; } catch {
