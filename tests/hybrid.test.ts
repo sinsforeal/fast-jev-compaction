@@ -365,7 +365,7 @@ function machine() {
     await handoffStep(ctx.host, ctx); await Promise.all(pending.splice(0));
   };
   const write = (body: string) => { now += 10; files.set(LATEST, body); mtimes.set(LATEST, now); };
-  return { step, files, submits, runs, logs, store, write, dropProcess: () => { delete host.process; }, tick: (n: number) => { now += n; }, failClear: (v: boolean) => { clearFails = v; } };
+  return { step, files, submits, runs, logs, store, write, dropProcess: () => { delete (host as Partial<HandoffHost>).process; }, tick: (n: number) => { now += n; }, failClear: (v: boolean) => { clearFails = v; } };
 }
 const good = `# Handoff for session ${SID}\nbody\nCOMPLETE\n`;
 

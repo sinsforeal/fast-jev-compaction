@@ -31,7 +31,7 @@ export type HandoffHost = {
     list: () => Promise<readonly { name: string }[]>;
   };
   /** 0.5.5: `$.process.run`, used only to rename and delete the order marker (`$.fs` has neither). */
-  process?: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number }> };
+  process: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number }> };
 };
 
 /** Per-session record under `handoff:<sessionId>` in `$.store`. */
@@ -77,7 +77,7 @@ const nativePath = (path: string): string => (onWindows() ? path.replace(/\//g, 
 
 /** Runs one process step; true when it exited 0. No `$.process` or a throw counts as false. */
 async function runStep(host: HandoffHost, argv: string[]): Promise<boolean> {
-  try { return !!host.process && (await host.process.run(argv, { timeoutMs: 5000 })).exitCode === 0; } catch { return false; }
+  try { return (await host.process.run(argv, { timeoutMs: 5000 })).exitCode === 0; } catch { return false; }
 }
 
 /**
