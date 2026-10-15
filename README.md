@@ -65,7 +65,9 @@ built-in compaction summary with the original messages.
    thinking and media. A non-text placeholder records an otherwise empty result.
 
 Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+fitted throw in the library. The hook retains context in hybrid sessions and uses
+unscored transcript recovery otherwise. A recovery cut still has to meet the
+reduction floor. No hook path requests the built-in summary.
 
 ## Install and usage
 
@@ -91,7 +93,7 @@ const transcript: Message[] = [
 const result = await compactMessages(transcript, { preserveRecentMessages: 4 });
 console.log(result.messages, result.decisions, result.stats);
 if (reductionRatio(result) < 0.25) {
-  // not worth it: keep the original transcript, or summarize instead
+  // Keep the original transcript and request a written handoff instead.
 }
 ```
 
@@ -126,12 +128,13 @@ put it in a source file.
 | `maxPostCompactTokens` | `0` | Hook only: warn above estimated visible size; never triggers summary; 0 disables warning |
 | `logDecisions` | `false` | Hook only: opt-in kept/dropped probabilities and text decisions |
 
-### 0.5.0 plugin options (read in `register`, from `pluginConfigs`)
+### Plugin options (read in `register`, from `pluginConfigs`)
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `compactAtTokens` | `160000` | turn.complete requests a prune when `context.tokens` >= this. When it is above 0 it replaces `compactAtPercent`; set `0` to use the percent trigger (also used when the token count is unreadable) |
-| `compactAtPercent` | `60` | legacy trigger, percent of the model window; ignored while `compactAtTokens` > 0 |
+| `compactAtTokens` | `160000` | With `DISABLE_AUTO_COMPACT=1`, turn.complete requests a prune when readable `context.tokens` >= this. Above 0 it replaces `compactAtPercent`; `0`, missing/unreadable token counts, or a missing/unreadable launcher flag use the percent trigger |
+| `compactAtPercent` | `60` | Percent-of-window trigger when the hybrid token trigger does not apply |
+| `minReductionRatio` | `0.25` | Strictly below this actual character reduction, skip the cut and immediately force a written HANDOFF NOW, independent of launcher flag and token thresholds. Exactly equal passes. Never requests a built-in summary |
 | `targetVisibleTokens` | `64000` | real post-cut target: after the first Jev pass the plugin raises `keepThreshold` over the cached probabilities (steps of 0.05, then once past 1; no new Jev request) until `estimateSessionTokens` is at or under it. If the floor (pins, user prompts, short replies) is still above it, `replyMinChars` and `injectedMinChars` are halved once (floors 1100 / 200; newly eligible blocks are abridged or removed unscored) and the sweep repeats. The log line reports achieved size, threshold, floor stage. 0 disables |
 | `maxPostCompactTokens` | `0` | legacy: only a warning above this estimate. Independent of the target |
 | `handoffAt` | `250000` | visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |

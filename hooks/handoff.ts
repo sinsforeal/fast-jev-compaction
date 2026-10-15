@@ -135,7 +135,7 @@ export function resumeOrder(latest: string, config: HandoffConfig): string {
   return `HANDOFF RESUME: read ${latest} and follow ${config.handoffSkillPath ?? 'the handoff skill'} section Resume; verify every SHA and queue row against git before acting.`;
 }
 
-export type FileCheck = { ok: true; mtimeMs: number } | { ok: false; reason: string };
+export type FileCheck = { ok: true; mtimeMs: number; size: number } | { ok: false; reason: string };
 
 /**
  * A handoff file counts only when it exists, was written after the order, its
@@ -155,10 +155,12 @@ export async function checkLatest(
     const lines = (await host.fs.read(path)).split(/\r?\n/);
     const after = await host.fs.stat(path);
     if (after.kind !== 'file' || after.mtimeMs !== stat.mtimeMs || after.size !== stat.size) return { ok: false, reason: 'changed while reading' };
-    if (!lines.slice(0, 10).some(line => line.includes(sessionId))) return { ok: false, reason: 'header does not name this session' };
+    const escapedId = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const sessionName = new RegExp(`(^|[^A-Za-z0-9_-])${escapedId}($|[^A-Za-z0-9_-])`);
+    if (!lines.slice(0, 10).some(line => sessionName.test(line))) return { ok: false, reason: 'header does not name this session' };
     const last = [...lines].reverse().find(line => line.trim().length > 0);
     if (last?.trim() !== 'COMPLETE') return { ok: false, reason: 'last line is not COMPLETE' };
-    return { ok: true, mtimeMs: stat.mtimeMs };
+    return { ok: true, mtimeMs: stat.mtimeMs, size: stat.size };
   } catch {
     return { ok: false, reason: 'unreadable' };
   }
@@ -266,7 +268,10 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
     const check = await checkLatest(host, latest, sessionId, state.orderAt);
     if (check.ok) {
-      if (!(await clearAvailable(host))) {
+      const canClear = await clearAvailable(host);
+      // Another completion can schedule a clear while capability lookup is awaiting.
+      if (pendingClears.has(sessionId)) return;
+      if (!canClear) {
         state.clearBlocked = true;
         await save(host, sessionId, state);
         await log('handoff complete but the host lists no runnable "clear" command; session left as it is (live check owed)');
@@ -291,6 +296,14 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           }));
           if (await host.session.id() !== sessionId) return;
           await log(`handoff complete (${latest}); clearing the session and resuming from the file`);
+          if (await host.session.id() !== sessionId) return;
+          // Marker writes and logs await host calls too. Nothing may clear a file
+          // replaced during those awaits, or resume from a marker for another version.
+          const final = await checkLatest(host, latest, sessionId, state.orderAt!);
+          if (!final.ok || final.mtimeMs !== fresh.mtimeMs || final.size !== fresh.size) {
+            await log(`handoff changed immediately before clear (${final.ok ? 'file replaced' : final.reason}); context retained`);
+            return;
+          }
           try {
             await host.command.run({ command: 'clear' });
           } catch {

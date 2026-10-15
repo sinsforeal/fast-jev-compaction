@@ -527,8 +527,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
   };
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
+  const loadedSessions = new Set<string>();
+  // A callback receipt, not a manifest/cache assertion. Disk only, once per session.
+  const loadedReceipt = async ($: LogHost): Promise<void> => {
+    let sid: string;
+    try { sid = await $.session.id(); } catch { return; }
+    if (!sid || loadedSessions.has(sid)) return;
+    loadedSessions.add(sid);
+    const flag = await autoCompactFlag($);
+    await appendLog($, `[${sid.slice(0, 8)}] module-loaded hook=${HOOK_ID}; session=${sid}; DISABLE_AUTO_COMPACT=${flag}`);
+  };
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
+      await loadedReceipt($ as unknown as LogHost);
       let sid = '';
       try { sid = await $.session.id(); } catch { /* legacy host */ }
       const ledger = ledgerFor(sid);
@@ -547,6 +558,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   }
 
   on('prompt.submit', async ($, event, next) => {
+    await loadedReceipt($);
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
     const ledger = ledgerFor(sid);
@@ -598,6 +610,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     return { skip: `Jev ${reason}; context left as it is, built-in summary not requested; written handoff required` };
   };
   try { on('session.compact', async ($, event) => {
+    await loadedReceipt($);
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
@@ -776,6 +789,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   }
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    await loadedReceipt($);
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;
     let hybrid = false;
