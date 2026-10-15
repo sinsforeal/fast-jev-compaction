@@ -101,6 +101,17 @@ completions cannot request a main-session cut. `precompute` is vetoed before
 network or UI work; it prepares a speculative result that the engine may never
 apply.
 
+Pending-order marker (0.5.5): while a SOON or NOW order is out, the machine keeps
+`<handoffDir>/<sessionId>/order.json` = `{ order: "soon"|"now", ts, tokens, limit, attempt }`
+(limit is `handoffAt` for soon, `handoffForceAt` for now), so a Stop hook has
+something on disk before `latest.md` exists. It is written to `order.json.tmp`
+and renamed through `$.process.run` (`$.fs` has no rename or delete), rewritten on
+every repeated order, and removed when the cycle ends: after the clear, from both
+the old and the new id folder, before the resume is submitted; also when the
+handoff is given up, the clear is blocked or the clear fails three times. If the
+process call is unavailable the file is written in place and removal rewrites it
+as `{"order":"none"}`. Sessions without the hybrid gate never get one.
+
 The first actual cut after start/reload uses Jev's handleless rebuild. Observers
 pin accepted mid-turn text/context and rendered deliveries; all append doors
 supply UUID chronology. Canonical queued deliveries replace provisional prompt

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.5 - 2026-10-14
+- Pending-order marker. A SOON or NOW handoff order writes `<handoffDir>/<sid>/order.json` (`order`, `ts`, `tokens`, `limit`, `attempt`) atomically, rewrites it on each repeated order, and removes it when the cycle ends (after the clear, in the old and new id folders, before the resume submit; also on give-up, blocked clear, third clear failure). Lets the trees' Stop hooks stand down before `latest.md` exists (seen live 20:30: HANDOFF NOW at 300,664 waited behind a Stop-hook refusal). The order log line names the marker path. Rename and delete go through `$.process.run`; without it the marker is written in place and removal leaves `{"order":"none"}`.
+
 ## 0.5.4 - 2026-10-14
 - The handoff root no longer follows the Bash tool's working directory. A relative `handoffDir` and `handoffSkillPath` resolve once per session id against the cwd seen on that session's first event (the launch cwd) and the root is cached; a later `cd` by the model cannot move `latest.md`, `resumed.json`, `current_session.json`, `prune_skipped.json` or the skill path (seen live 19:32: `var/handoffs/var/handoffs/...`, order re-issued). A changed cwd logs one line per session (`handoff root stays at the captured cwd ...`). A new session id captures again, except after the plugin's own handoff clear: there the new id inherits the old id's root, so a `cd` before the clear cannot move the resume. Absolute values are unchanged.
 
