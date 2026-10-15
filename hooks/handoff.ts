@@ -50,13 +50,17 @@ export type HandoffState = {
   clearFailures: number;
   /** The clear is not available on this host (logged once). */
   clearBlocked?: boolean;
+  /** A ratio miss forces NOW independently of context size and launcher ENV. */
+  forceReason?: string;
 };
 
 export const SOON_STEP_TOKENS = 50_000;
 export const MAX_FORCED_REPEATS = 3;
 export const MAX_CLEAR_FAILURES = 3;
-/** Delay before a detached host call, so the turn.complete hook has returned first. */
+/** Delay before a detached host call, so its hook has returned first. */
 export const DETACH_DELAY_MS = 250;
+// Only live work is in memory. A module reload cannot strand a persisted in-flight flag.
+const pendingClears = new Set<string>();
 
 export const stateKey = (sessionId: string): string => `handoff:${sessionId}`;
 
@@ -88,11 +92,11 @@ async function runStep(host: HandoffHost, argv: string[]): Promise<boolean> {
  */
 export async function writeOrderMarker(
   host: HandoffHost, dir: string, sessionId: string,
-  marker: { order: 'soon' | 'now'; tokens: number; limit: number; attempt: number },
+  marker: { order: 'soon' | 'now'; tokens: number | undefined; limit: number; attempt: number; reason?: string },
 ): Promise<string> {
   const path = sessionFile(dir, sessionId, 'order.json');
   try {
-    const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens, limit: marker.limit, attempt: marker.attempt });
+    const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens ?? null, limit: marker.limit, attempt: marker.attempt, ...(marker.reason ? { reason: marker.reason } : {}) });
     const tmp = `${path}.tmp`;
     await host.fs.write(tmp, body);
     const moved = await runStep(host, onWindows()
@@ -120,8 +124,11 @@ export function soonOrder(visible: number, config: HandoffConfig, latest: string
   return `HANDOFF SOON: unprunable context is ${visible} tokens (limit ${config.handoffForceAt}). Finish the current step, then follow ${config.handoffSkillPath ?? 'the handoff skill'} section Handoff and write ${latest} ending with the line COMPLETE. Do not start new work.`;
 }
 
-export function nowOrder(visible: number, config: HandoffConfig, latest: string): string {
-  return `HANDOFF NOW: unprunable context is ${visible} tokens (limit ${config.handoffForceAt}). Follow ${config.handoffSkillPath ?? 'the handoff skill'} section Handoff and write ${latest} ending with the line COMPLETE now, then end your turn; the session will be cleared and resumed by the plugin.`;
+export function nowOrder(visible: number | undefined, config: HandoffConfig, latest: string, reason?: string): string {
+  const cause = reason
+    ? `${reason}; current context ${visible === undefined ? 'token count unavailable' : `is ${visible} tokens`} (token limit ${config.handoffForceAt} does not delay this order)`
+    : `unprunable context is ${visible} tokens (limit ${config.handoffForceAt})`;
+  return `HANDOFF NOW: ${cause}. Follow ${config.handoffSkillPath ?? 'the handoff skill'} section Handoff and write ${latest} ending with the line COMPLETE now, then end your turn; the session will be cleared and resumed by the plugin.`;
 }
 
 export function resumeOrder(latest: string, config: HandoffConfig): string {
@@ -143,8 +150,11 @@ export async function checkLatest(
   try {
     if (!(await host.fs.exists(path))) return { ok: false, reason: 'missing' };
     const stat = await host.fs.stat(path);
+    if (stat.kind !== 'file') return { ok: false, reason: 'not a file' };
     if (!(stat.mtimeMs > orderAt)) return { ok: false, reason: 'older than the order' };
     const lines = (await host.fs.read(path)).split(/\r?\n/);
+    const after = await host.fs.stat(path);
+    if (after.kind !== 'file' || after.mtimeMs !== stat.mtimeMs || after.size !== stat.size) return { ok: false, reason: 'changed while reading' };
     if (!lines.slice(0, 10).some(line => line.includes(sessionId))) return { ok: false, reason: 'header does not name this session' };
     const last = [...lines].reverse().find(line => line.trim().length > 0);
     if (last?.trim() !== 'COMPLETE') return { ok: false, reason: 'last line is not COMPLETE' };
@@ -157,8 +167,16 @@ export async function checkLatest(
 export type StepContext = {
   host: HandoffHost;
   sessionId: string;
-  /** The post-cut estimate when a prune ran this turn, else context.tokens. */
-  visible: number;
+  /** The post-cut estimate when a prune ran this turn, else context.tokens. Never a synthetic threshold. */
+  visible: number | undefined;
+  /** Request a forced written handoff now, independent of token thresholds. Persisted until the cycle ends. */
+  forceReason?: string;
+  /** A compaction hook may request an order, but must never clear or repeat an existing order. */
+  requestOnly?: boolean;
+  /** Legacy sessions do not get token-triggered orders, but still finish a forced ratio handoff. */
+  thresholdsEnabled?: boolean;
+  /** Do not repeat NOW at the end of the turn that first requested it. File validation still runs. */
+  repeatForced?: boolean;
   config: HandoffConfig;
   log: (text: string) => Promise<void>;
   /** Runs work after the hook has returned; errors are the work's own to log. */
@@ -182,12 +200,12 @@ async function pause(host: HandoffHost): Promise<void> {
   try { await host.clock.sleep(DETACH_DELAY_MS); } catch { /* no sleep: go on */ }
 }
 
-/** Does the host list a runnable `clear`? Unknown (no list, or it throws) counts as yes: the run itself then decides. */
+/** Only a host that lists a runnable `clear` may clear. An unknown capability is not permission. */
 async function clearAvailable(host: HandoffHost): Promise<boolean> {
   try {
     return (await host.command.list()).some(c => c.name === 'clear');
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -223,68 +241,91 @@ async function followSessionId(
   }
 }
 
-/** One turn.complete step of the machine. Never throws into the caller. */
+/** A compaction may request NOW immediately. Only later, non-aborted turn completions may clear. */
 export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'host'>): Promise<void> {
   const { sessionId, visible, config, log, detach } = ctx;
   const dir = config.handoffDir;
   if (!dir) return;
   const latest = sessionFile(dir, sessionId, 'latest.md');
   const state = await load(host, sessionId);
-  let changed = false;
+  if (ctx.forceReason !== undefined && state.forceReason === undefined) {
+    state.forceReason = ctx.forceReason;
+    await save(host, sessionId, state);
+  }
+  // Repeated compact requests neither reset the repeat budget nor clear a session.
+  if (pendingClears.has(sessionId) || (ctx.requestOnly && state.forcedOrders > 0)) return;
+  const queueOrder = (text: string): void => detach(async () => {
+    await pause(host);
+    try {
+      if (await host.session.id() !== sessionId) return;
+      await host.prompt.submit({ text });
+    } catch { await log('handoff order submit failed; context retained, retry budget unchanged'); }
+  });
 
   // 1. An order is out: is the file complete and newer than it?
-  if (state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
+  if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
     const check = await checkLatest(host, latest, sessionId, state.orderAt);
     if (check.ok) {
       if (!(await clearAvailable(host))) {
         state.clearBlocked = true;
         await save(host, sessionId, state);
-        await log(`handoff complete but the host lists no runnable "clear" command; session left as it is (live check owed)`);
+        await log('handoff complete but the host lists no runnable "clear" command; session left as it is (live check owed)');
         await clearOrderMarker(host, dir, sessionId, log);
         return;
       }
-      // resumed.json first: the SessionStart hook skips a file this names.
-      await host.fs.write(sessionFile(dir, sessionId, 'resumed.json'), JSON.stringify({
-        by: 'plugin', file: latest, mtime: check.mtimeMs, at: new Date().toISOString(),
-      }));
-      await log(`handoff complete (${latest}); clearing the session and resuming from the file`);
+      pendingClears.add(sessionId);
       detach(async () => {
-        await pause(host);
         try {
-          await host.command.run({ command: 'clear' });
-        } catch {
-          const again = await load(host, sessionId);
-          again.clearFailures += 1;
-          await save(host, sessionId, again);
-          await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}); will retry on the next turn`);
-          if (again.clearFailures >= MAX_CLEAR_FAILURES) await clearOrderMarker(host, dir, sessionId, log);
-          return;
-        }
-        const newId = await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
-        // 0.5.5: the cycle is over; neither folder keeps an order marker when the resume goes out.
-        await clearOrderMarker(host, dir, sessionId, log);
-        if (newId && newId !== sessionId) await clearOrderMarker(host, dir, newId, log);
-        await log('handoff cleared the session; submitting the resume order');
-        try {
-          await host.prompt.submit({ text: resumeOrder(latest, config) });
-        } catch {
-          await log('handoff resume submit failed after the clear');
-        }
-        await host.store.delete(stateKey(sessionId));
+          await pause(host);
+          if (await host.session.id() !== sessionId) return;
+          // The file may have changed since the hook queued this work. Revalidate
+          // after the detached delay; a stale/incomplete/missing file never clears.
+          const fresh = await checkLatest(host, latest, sessionId, state.orderAt!);
+          if (!fresh.ok) {
+            await log(`handoff changed before clear (${fresh.reason}); context retained`);
+            return;
+          }
+          // resumed.json first: the SessionStart hook skips a file this names.
+          await host.fs.write(sessionFile(dir, sessionId, 'resumed.json'), JSON.stringify({
+            by: 'plugin', file: latest, mtime: fresh.mtimeMs, at: new Date().toISOString(),
+          }));
+          if (await host.session.id() !== sessionId) return;
+          await log(`handoff complete (${latest}); clearing the session and resuming from the file`);
+          try {
+            await host.command.run({ command: 'clear' });
+          } catch {
+            const again = await load(host, sessionId);
+            again.clearFailures += 1;
+            await save(host, sessionId, again);
+            await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}); ${again.clearFailures < MAX_CLEAR_FAILURES ? 'will retry on the next turn' : 'context retained, retry limit reached'}`);
+            if (again.clearFailures >= MAX_CLEAR_FAILURES) await clearOrderMarker(host, dir, sessionId, log);
+            return;
+          }
+          const newId = await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
+          await clearOrderMarker(host, dir, sessionId, log);
+          if (newId && newId !== sessionId) await clearOrderMarker(host, dir, newId, log);
+          await log('handoff cleared the session; submitting the resume order');
+          try {
+            await host.prompt.submit({ text: resumeOrder(latest, config) });
+          } catch {
+            await log('handoff resume submit failed after the clear');
+          }
+          await host.store.delete(stateKey(sessionId));
+        } finally { pendingClears.delete(sessionId); }
       });
       return;
     }
     // 2. Outstanding forced order, file not complete: repeat once per turn, capped.
     if (state.forcedOrders > 0 && !state.gaveUp) {
+      if (ctx.repeatForced === false) return;
       if (state.forcedOrders - 1 < MAX_FORCED_REPEATS) {
         state.forcedOrders += 1;
         state.orderAt = await host.clock.now();
         await save(host, sessionId, state);
         await log(`handoff order repeated (${state.forcedOrders - 1} of ${MAX_FORCED_REPEATS}); file not complete: ${check.reason}`);
-        const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders });
-        await log(`handoff order marker rewritten: ${marker} (now, attempt ${state.forcedOrders}, ${visible}/${config.handoffForceAt})`);
-        const text = nowOrder(visible, config, latest);
-        detach(async () => { await pause(host); await host.prompt.submit({ text }); });
+        const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason });
+        await log(`handoff order marker rewritten: ${marker} (now, attempt ${state.forcedOrders}, ${visible ?? 'unknown'}/${config.handoffForceAt})`);
+        queueOrder(nowOrder(visible, config, latest, state.forceReason));
       } else {
         state.gaveUp = true;
         await save(host, sessionId, state);
@@ -297,31 +338,28 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   }
   if (state.gaveUp || state.clearBlocked) return;
 
-  // 3. New orders from the visible size.
-  if (visible >= config.handoffForceAt) {
+  // 3. A ratio failure is a real reason, not a fabricated 300k token count.
+  const thresholdForce = ctx.thresholdsEnabled !== false && visible !== undefined && visible >= config.handoffForceAt;
+  if (state.forceReason !== undefined || thresholdForce) {
     if (state.forcedOrders === 0) {
       state.forcedOrders = 1;
       state.orderAt = await host.clock.now();
-      changed = true;
-      const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders });
-      await log(`handoff order NOW at ~${visible} tokens (limit ${config.handoffForceAt}); marker ${marker} (order now); expecting ${latest}`);
-      const text = nowOrder(visible, config, latest);
       await save(host, sessionId, state);
-      detach(async () => { await pause(host); await host.prompt.submit({ text }); });
+      const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason });
+      const cause = state.forceReason ? `forced by ${state.forceReason}; actual context tokens ${visible ?? 'unavailable'}` : `at ~${visible} tokens (limit ${config.handoffForceAt})`;
+      await log(`handoff order NOW ${cause}; marker ${marker} (order now); expecting ${latest}`);
+      queueOrder(nowOrder(visible, config, latest, state.forceReason));
     }
     return;
   }
-  if (visible >= config.handoffAt && state.forcedOrders === 0 &&
+  if (ctx.thresholdsEnabled !== false && visible !== undefined && visible >= config.handoffAt && state.forcedOrders === 0 &&
       (state.lastSoonAt === undefined || visible >= state.lastSoonAt + SOON_STEP_TOKENS)) {
     state.lastSoonAt = visible;
     state.orderAt = await host.clock.now();
-    changed = true;
     state.soonOrders = (state.soonOrders ?? 0) + 1;
+    await save(host, sessionId, state);
     const marker = await writeOrderMarker(host, dir, sessionId, { order: 'soon', tokens: visible, limit: config.handoffAt, attempt: state.soonOrders });
     await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}); marker ${marker} (order soon); expecting ${latest}`);
-    const text = soonOrder(visible, config, latest);
-    await save(host, sessionId, state);
-    detach(async () => { await pause(host); await host.prompt.submit({ text }); });
+    queueOrder(soonOrder(visible, config, latest));
   }
-  void changed;
 }
