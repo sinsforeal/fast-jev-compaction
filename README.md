@@ -161,7 +161,8 @@ stage was needed, and the number of requests.
   and hidden blocks. The outcome is a prepared replacement; the next request's
   measured prompt size is the acceptance check.
 - Generated declarations are from 2.1.274; the supplemental delivery/API observers
-  was verified on Claude Code 2.1.299. Older hosts may reject it during scanning;
+  are verified on Claude Code 2.1.300, including API `type: "text"` delivery blocks
+  and legacy `kind: "text"` projections. Older hosts may reject it during scanning;
   retain the 0.3.0 cache for rollback. Organization-managed installations can skip
   user-installed compaction hooks under managed policy.
 - `targetVisibleTokens` counts the visible messages only, so the real context
@@ -180,7 +181,7 @@ stage was needed, and the number of requests.
 The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
 feeds `session.compact` transcripts through `src/` and preserves observer-confirmed
 instructions. See [`hooks/README.md`](hooks/README.md) for configuration and the
-Claude Code 2.1.274 type reference and the verified 2.1.299 observer contract.
+Claude Code 2.1.274 type reference and the verified 2.1.300 observer contract.
 
 ### Fidelity rules
 
@@ -231,7 +232,10 @@ Every skip and recovery toasts its reason. With `logDecisions: true`,
 the decision log also includes cumulative session-local skip counts by reason,
 alongside kept/dropped probabilities. Error bodies and credentials are omitted.
 Recovery reasons and chronology decisions also go to
-`~/.claude/fast-jev-compaction.log`. Disk/UI failures never change a cut.
+`~/.claude/fast-jev-compaction.log`. Routine opaque-block receipts go only to this
+disk log; cut summaries, applied measurements, errors and fidelity-gap warnings
+remain visible. UI log lines are transcript diagnostics, not model context.
+Disk/UI failures never change a cut.
 Speculative `precompute` remains vetoed.
 
 ### Install in Claude Code
@@ -264,7 +268,7 @@ The same variable is the plugin's session gate: without it the hook behaves as 0
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.6 before reloading.
+Confirm both marketplace and cached plugin manifests say 0.5.7 before reloading.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

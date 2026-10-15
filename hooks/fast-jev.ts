@@ -437,6 +437,14 @@ async function log($: LogHost, text: string): Promise<void> {
   try { $.ui.log(line); } catch { /* UI failure cannot change compaction. */ }
 }
 
+// Routine opaque-block receipts belong on disk. ui.log is not model context,
+// but still fills the visible transcript. Missing-content/chronology warnings
+// remain visible because they describe a gap rather than an expected projection.
+async function logFidelity($: LogHost, note: string): Promise<void> {
+  if (!note.includes('not carried handleless')) return log($, `fidelity: ${note}`);
+  await appendLog($, await tag($, `fidelity: ${note}`));
+}
+
 async function notify($: LogHost, text: string): Promise<void> {
   const line = await tag($, text);
   await appendLog($, line);
@@ -606,7 +614,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       catch { await log($, 'fidelity: API history unavailable; observable transcript order used'); }
       recoverApiHistory(apiHistory, projection, ledger, event.agentId, pinProvenanceTexts(event.messages));
       input = ledger.prepare(projection, event.agentId);
-      for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
+      for (const note of ledger.takeNotes()) await logFidelity($, note);
       if (!config.apiKey) throw new JevRequestError('TYPESAFE_API_KEY is not configured');
       const asker = jevAsker(async (url, init) => {
           const response = await $.http.fetch(url, init);
@@ -653,7 +661,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // Include deliveries that arrived while a failed request was in flight.
       input = ledger.prepare(projection, event.agentId);
       const recoveryCheckpoint = ledger.checkpoint();
-      for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
+      for (const note of ledger.takeNotes()) await logFidelity($, note);
       const result = compactTranscript(input, configured);
       result.stats.charsBefore = charsBefore(input);
       const pins = new Set<number>();

@@ -16,9 +16,12 @@ function harness(options = {}) {
     { apiKey: 'fixture', preserveRecentMessages: 1, minReductionRatio: -100, ...options });
   let rows = history();
   const logs: string[] = [];
+  const files = new Map<string, string>();
   const fetch = vi.fn(async (_url, init) => ({ status: 200, ok: true,
     text: JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(init.body).questions).map(k => [k, { noul: 0 }])) }) }));
-  const $ = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? '1' : undefined }, settings: { read: async () => ({}) },
+  const $ = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? '1' : k === 'USERPROFILE' ? 'F:/fixture' : undefined }, settings: { read: async () => ({}) },
+    fs: { exists: async (p: string) => files.has(p), read: async (p: string) => files.get(p) ?? '',
+      write: async (p: string, text: string) => { files.set(p, text); } },
     http: { fetch }, clock: { sleep: vi.fn(async () => {}) },
     ui: { log: (s: string) => logs.push(s), toast: vi.fn() }, session: { messages: async () => rows } };
   const core = vi.fn(async () => ({ messages: [m('user', 'summary')] }));
@@ -26,7 +29,7 @@ function harness(options = {}) {
   const setRows = (next: ReturnType<typeof history>) => { rows = next; };
   const append = (text: string, uuid = 'delivery', agentId?: string) => handlers['session.append']($,
     { door: 'delivery', uuid, agentId, message: { type: 'attachment', name: 'queued_command', content: [{ kind: 'text', text }] } }, async e => e);
-  return { handlers, $, fetch, logs, core, cut, setRows, append };
+  return { handlers, $, fetch, logs, core, cut, setRows, append, diskLog: () => [...files.values()].join('\n') };
 }
 
 it('041: post-cut target defaults to measurement-only zero', () => {
@@ -144,7 +147,8 @@ it('042: an opaque delivery block is noted and dropped, its text kept, never a b
   const out = await h.cut();
   expect(h.core).not.toHaveBeenCalled(); expect(h.fetch).toHaveBeenCalled();
   expect(out.messages.filter(x => x.text === 'relayed order')).toHaveLength(1);
-  expect(h.logs.some(s => s.startsWith('fidelity: delivery opaque') && s.includes('1 opaque block(s) not carried handleless (image)'))).toBe(true);
+  expect(h.diskLog()).toContain('fidelity: delivery opaque: 1 opaque block(s) not carried handleless (image)');
+  expect(h.logs.some(s => s.startsWith('fidelity: delivery'))).toBe(false);
   expect(h.logs.some(s => s.startsWith('fallback '))).toBe(false);
 });
 it('042: a delivery of only opaque blocks pins nothing and still never summarizes', async () => {
@@ -153,7 +157,8 @@ it('042: a delivery of only opaque blocks pins nothing and still never summarize
     message: { type: 'attachment', content: [{ kind: 'block', index: 0, type: 'image' }] } }, async e => e);
   const out = await h.cut();
   expect(h.core).not.toHaveBeenCalled(); expect(out.messages.filter(x => x.text === '' && x.role === 'user' && !x.toolResults)).toHaveLength(0);
-  expect(h.logs.some(s => s.startsWith('fidelity: delivery opaque-only'))).toBe(true);
+  expect(h.diskLog()).toContain('fidelity: delivery opaque-only');
+  expect(h.logs.some(s => s.startsWith('fidelity: delivery'))).toBe(false);
 });
 it('042: toasts and log lines are appended to ~/.claude/fast-jev-compaction.log', async () => {
   const h = harness(); const files = new Map<string, string>();
@@ -275,7 +280,8 @@ it('042: opaque legacy API content is noted, its text kept, never a fallback', a
   const h = harness(); const api = apiHistory(''); api[0].content.push({ type: 'image', source: { type: 'base64', data: 'fixture' } } as any);
   h.$.session.messages = async (args?: any) => args?.as === 'api' ? api as any : history();
   await h.cut();
-  expect(h.logs.some(s => s.startsWith('fidelity: API history row') && s.includes('opaque user block(s) not carried handleless (image)'))).toBe(true);
+  expect(h.diskLog()).toContain('opaque user block(s) not carried handleless (image)');
+  expect(h.logs.some(s => s.startsWith('fidelity: API history row'))).toBe(false);
   expect(h.logs.some(s => s.startsWith('fallback '))).toBe(false);
   expect(h.core).not.toHaveBeenCalled(); expect(h.fetch).toHaveBeenCalled();
 });

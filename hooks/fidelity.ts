@@ -1,6 +1,6 @@
 import type { SessionMessage } from 'claude-code';
 import type { Message } from '../src/types.js';
-import type { DeliveryAppend } from './runtime-contract.js';
+import type { DeliveryAppend, DeliveryContentBlock } from './runtime-contract.js';
 import { normalizeNotificationText, normalizeLegacyNotificationText } from './notification-text.js';
 
 // These are safe fixed reasons. Never include arbitrary message/error content.
@@ -19,6 +19,11 @@ const canonicalText = (m: SessionMessage | Message): string => m.role === 'user'
 const key = (m: SessionMessage | Message): string => JSON.stringify({ role: m.role, text: m.text,
   uses: m.toolUses.map(t => [t.tool_use_id, t.tool, t.input]),
   results: m.toolResults?.map(t => [t.tool_use_id, t.text, t.isError]) });
+
+// session.append now supplies ApiContentBlock, not the legacy kind projection.
+// An explicit opaque kind must never be promoted by a coincidental type/text.
+const isTextBlock = (block: DeliveryContentBlock): block is DeliveryContentBlock & { text: string } =>
+  typeof block.text === 'string' && (block.kind === 'text' || block.kind === undefined && block.type === 'text');
 
 /** Session-local observer ledger. UUIDs order deliveries; snapshots anchor prompts.
  * Nothing is persisted and a reconstruction refusal applies only to this cut.
@@ -48,10 +53,10 @@ export class FidelityLedger {
     // handleless SessionMessage. The host's own projection already carries such a
     // delivery as its text blocks joined; carry exactly that, note the dropped kinds
     // for the log, and never spend the whole cut on a built-in summary for it.
-    const opaque = content ? content.filter(b => b.kind !== 'text' || typeof b.text !== 'string')
+    const opaque = content ? content.filter(b => !isTextBlock(b))
       .map(b => { const t = (b as { type?: unknown }).type; return typeof t === 'string' ? t : String(b.kind ?? 'unknown'); }) : [];
     const notificationText = (event.origin as { kind?: string } | undefined)?.kind === 'engine' ? 'generated' : 'verbatim';
-    const text = problem ? undefined : canonical(content!.map(b => (b.kind === 'text' && typeof b.text === 'string') ? b.text : '').join(''), notificationText);
+    const text = problem ? undefined : canonical(content!.filter(isTextBlock).map(b => b.text).join(''), notificationText);
     if (opaque.length) {
       this.notes.push(`delivery ${event.uuid}${event.agentId ? ` (agent ${event.agentId})` : ''}: ${opaque.length} opaque block(s) not carried handleless (${[...new Set(opaque)].join(', ')}); text blocks kept verbatim`);
       if (text === '') return; // nothing reconstructable here; the host projection holds the same

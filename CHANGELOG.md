@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7 - 2026-10-15
+
+- Recognize Claude Code 2.1.300 `session.append` API text blocks (`type: "text"`) as well as legacy projected text (`kind: "text"`). The live 10:06 cut exposed ordinary text being mislabeled opaque and skipped by the observer ledger. Text blocks now join verbatim and become pinned deliveries, including arrivals during scoring and child scopes. Explicit opaque kinds and missing/non-string text remain excluded.
+- Keep routine opaque-block receipts in `~/.claude/fast-jev-compaction.log` only. Cut summaries, applied measurements, errors and fidelity-gap warnings remain visible. These `ui.log` receipts were visible transcript diagnostics, not model context; the 0.5.6 bookkeeping reduction remains intact.
+- Validation: 203 tests, library/hook typechecks, build and Claude plugin scanner validation. New registered-hook regressions replay the observed block shape with hidden projected/API deliveries, durable pin writes, a cold restart and a child arrival during scoring. Installation and a fresh native loader receipt remain deployment checks; this release does not rewrite running-session history.
+
 ## 0.5.6 - 2026-10-15
 
 - Collapse exact standalone tool-removal notices into one history-level warning; keep detailed counts in compaction decisions/logs. Repeated passes are idempotent. User text, quoted/fenced examples and tool payloads are untouched.
