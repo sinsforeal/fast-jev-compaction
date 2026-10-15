@@ -50,16 +50,18 @@ const HOOK_DEFAULTS = {
 /** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
-/**
- * The hybrid (token trigger, skip on a ratio miss, handoff orders, clear and
- * resume) runs only in a session whose launcher set DISABLE_AUTO_COMPACT=1:
- * the harness compaction is off there, so this hook owns the context. In any
- * other session the hook keeps the 0.4.4 behaviour: percent trigger, a ratio
- * miss falls through to the harness summary, no handoff. One plugin cache and
- * one options block serve all sessions; this switch keeps the test to one.
- */
-async function hybridSession($: { env: { get(name: string): Promise<string | undefined> } }): Promise<boolean> {
-  try { return (await $.env.get('DISABLE_AUTO_COMPACT')) === '1'; } catch { return false; }
+// Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
+const HOOK_ID = 'fast-jev-compaction@0.5.8/forced-handoff-floor';
+type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
+async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
+  try {
+    const value = await $.env.get('DISABLE_AUTO_COMPACT');
+    return value === '1' ? '1' : value === undefined ? 'unset' : 'other';
+  } catch { return 'unreadable'; }
+}
+/** ENV selects token triggers/target fitting only. It can never authorize a summary fallback. */
+async function hybridSession($: EnvHost): Promise<boolean> {
+  return await autoCompactFlag($) === '1';
 }
 
 export type HookFetchInit = {
@@ -465,13 +467,13 @@ type SkipHost = LogHost & {
 };
 
 /** `<handoffDir>/<sessionId>/prune_skipped.json`: { at, reason, tokens, estimate }. Never throws. */
-async function writeSkipMarker($: SkipHost, roots: HandoffRoots, config: HookConfig, reason: string, estimate: number): Promise<void> {
+async function writeSkipMarker($: SkipHost, roots: HandoffRoots, config: HookConfig, reason: string, estimate: number, actualTokens?: number): Promise<void> {
   if (!config.handoffDir) return;
   try {
     const id = await $.session.id();
     if (!id) return;
-    let tokens: number | undefined;
-    try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
+    let tokens: number | undefined = actualTokens;
+    if (tokens === undefined) try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
     const dir = await roots.resolve(await resolvedCwd($), id, config.handoffDir, text => log($, text));
     await $.fs.write(sessionFile(dir, id, 'prune_skipped.json'),
       JSON.stringify({ at: new Date().toISOString(), reason, tokens: tokens ?? null, estimate }));
@@ -514,6 +516,63 @@ async function resolvedCwd($: CwdHost): Promise<string | undefined> {
   try { return await $.session.cwd(); } catch { return undefined; }
 }
 
+/** A callback receipt, not a manifest/cache assertion. Disk only, once per session. */
+async function loadedReceipt($: LogHost, loadedSessions: Set<string>): Promise<void> {
+  let sid: string;
+  try { sid = await $.session.id(); } catch { return; }
+  if (!sid || loadedSessions.has(sid)) return;
+  loadedSessions.add(sid);
+  const flag = await autoCompactFlag($);
+  await appendLog($, `[${sid.slice(0, 8)}] module-loaded hook=${HOOK_ID}; session=${sid}; DISABLE_AUTO_COMPACT=${flag}`);
+}
+
+type RatioMissState = {
+  fallbackCounts: Map<string, number>;
+  handoffRoots: HandoffRoots;
+  forcedThisTurn: Set<string>;
+  notBefore: Map<string, number>;
+  forceNotices: Set<string>;
+};
+
+// Host-taking helpers must stay module-local for the native hooks loader.
+// The mutable state still belongs to each registration, never to this module.
+async function ratioMiss(
+  $: SkipHost & HandoffHost, configured: HookConfig, state: RatioMissState,
+  sid: string, reason: string, estimate: number, fitNote = '',
+) {
+  const { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices } = state;
+  let visible: number | undefined;
+  try {
+    const tokens = (await $.session.usage()).context.tokens;
+    if (tokens !== undefined && Number.isFinite(tokens) && tokens >= 0) visible = tokens;
+  } catch { /* Force is reason-driven even when actual usage is unavailable. */ }
+  await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
+  await writeSkipMarker($, handoffRoots, configured, reason, estimate, visible);
+  let forced = false;
+  if (sid && configured.handoffDir) {
+    forcedThisTurn.add(sid);
+    if (visible !== undefined) notBefore.set(sid, visible + PRUNE_HYSTERESIS_TOKENS);
+    try {
+      const cwd = await resolvedCwd($);
+      await handoffStep($, {
+        sessionId: sid, visible, forceReason: reason, requestOnly: true,
+        config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
+          handoffDir: await handoffRoots.resolve(cwd, sid, configured.handoffDir, text => log($, text)),
+          handoffSkillPath: await handoffRoots.resolve(cwd, sid, configured.handoffSkillPath, text => log($, text)) },
+        log: text => log($, text),
+        detach: work => { void work().catch(() => { /* The context remains intact on a host failure. */ }); },
+      });
+      forced = true;
+    } catch { /* A failed store/capability cannot authorize a summary or clear. */ }
+  }
+  if (!forceNotices.has(sid)) {
+    forceNotices.add(sid);
+    const flag = await autoCompactFlag($);
+    await notify($, `prune skipped (${reason}); context left as it is, built-in summary not requested; ${forced ? 'written handoff forced' : 'forced handoff could not be queued, context retained'}${fitNote}; hook=${HOOK_ID}; DISABLE_AUTO_COMPACT=${flag}`);
+  }
+  return { skip: `Jev ${reason}; context left as it is, built-in summary not requested; written handoff required` };
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -525,8 +584,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
   };
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
+  const loadedSessions = new Set<string>();
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
+      await loadedReceipt($ as unknown as LogHost, loadedSessions);
       let sid = '';
       try { sid = await $.session.id(); } catch { /* legacy host */ }
       const ledger = ledgerFor(sid);
@@ -545,6 +606,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   }
 
   on('prompt.submit', async ($, event, next) => {
+    await loadedReceipt($, loadedSessions);
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
     const ledger = ledgerFor(sid);
@@ -561,7 +623,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let supportsCompaction = false;
   let lastPostCut: number | undefined;
   const notBefore = new Map<string, number>();
-  try { on('session.compact', async ($, event, next) => {
+  const forcedThisTurn = new Set<string>();
+  const forceNotices = new Set<string>();
+  const ratioMissState: RatioMissState = { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices };
+  try { on('session.compact', async ($, event) => {
+    await loadedReceipt($, loadedSessions);
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
@@ -703,20 +769,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (fit && !fit.reached) {
       await log($, `warn: unprunable floor ~${fit.achieved} tokens is above targetVisibleTokens ${configured.targetVisibleTokens}; best cut kept`);
     }
-    // 0.5.0, hybrid session: the built-in summary is never requested; a missed ratio leaves the
-    // context as it is and the handoff machine takes over. Any other session keeps the 0.4.4
-    // fallback to the harness summary, which is the compaction that session still relies on.
+    // A ratio miss always forces a written handoff. ENV and token thresholds
+    // cannot turn this into a built-in summary or delay the forced state.
     if (reductionRatio(result) < configured.minReductionRatio) {
-      const reason = `reduction ${percent(reductionRatio(result))} below ${percent(configured.minReductionRatio)} minimum`;
-      if (!(await hybridSession($))) {
-        await notify($, `fallback to built-in summary (${reason}; harness compaction is on in this session)${fitNote}`);
-        await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
-        return next(event);
-      }
-      await notify($, `prune skipped (${reason}); context left as it is, built-in summary not requested${fitNote}`);
-      await countFallback($, fallbackCounts, 'reduction_ratio', configured.logDecisions);
-      await writeSkipMarker($, handoffRoots, configured, reason, post);
-      return { skip: `Jev ${reason}; context left as it is, built-in summary not requested` };
+      const reason = `reduction ${reductionRatio(result) * 100}% below ${configured.minReductionRatio * 100}% minimum`;
+      return ratioMiss($ as unknown as SkipHost & HandoffHost, configured, ratioMissState, sid, reason, estimateSessionTokens(input), fitNote);
     }
     await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}${fitNote}; replacement prepared for ${event.trigger})`);
     // Persistence and diagnostics await host calls. A delivery accepted during
@@ -732,9 +789,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const lateStats = { ...result.stats, charsBefore: charsBefore(refreshed),
         charsAfter: lateMessages.reduce((n, m) => n + messageChars(m), 0) };
       if (reductionRatio({ stats: lateStats }) < configured.minReductionRatio) {
-        // Keep live history intact; never install a late delivery without its pins.
-        if (await hybridSession($)) return { skip: 'late deliveries left insufficient reduction; history retained' };
-        return next(event);
+        // Keep live history and late-arrival pins intact; never fall through to core.
+        const reason = `late deliveries: reduction ${reductionRatio({ stats: lateStats }) * 100}% below ${configured.minReductionRatio * 100}% minimum`;
+        return ratioMiss($ as unknown as SkipHost & HandoffHost, configured, ratioMissState, sid, reason, estimateSessionTokens(refreshed));
       }
       ledger.rebase(restored, event.agentId);
       if (event.agentId === undefined) lastPostCut = estimateSessionTokens(lateMessages);
@@ -749,24 +806,25 @@ export const register: Register = (on: On, options: PluginOptions) => {
   }
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    await loadedReceipt($, loadedSessions);
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;
     let hybrid = false;
     let visible: number | undefined;
     let sid: string | undefined;
+    try { sid = await $.session.id(); } catch { sid = undefined; }
+    hybrid = await hybridSession($);
     try {
       const { context } = await $.session.usage();
-      try { sid = await $.session.id(); } catch { sid = undefined; }
       const tokens = context.tokens;
       visible = tokens;
-      hybrid = await hybridSession($);
       const hold = sid ? notBefore.get(sid) : undefined;
       // Hybrid session with compactAtTokens > 0: compare context.tokens. Any other session, an
       // unset trigger (0) or an unreadable count: the 0.4.4 percent path.
       const due = hybrid && configured.compactAtTokens > 0 && tokens !== undefined
         ? tokens >= configured.compactAtTokens
         : (context.percent ?? 0) >= configured.compactAtPercent;
-      if (compacting || !due || (hold !== undefined && (tokens ?? 0) < hold)) { /* no prune this turn */ }
+      if (compacting || !due || (sid && forcedThisTurn.has(sid)) || (hold !== undefined && (tokens ?? 0) < hold)) { /* no prune this turn */ }
       else {
         compacting = true;
         ownsCompaction = true;
@@ -789,12 +847,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } finally {
       if (ownsCompaction) compacting = false;
     }
-    // Handoff machine: hybrid session, main loop, not after an interrupt, and only with a handoffDir.
-    if (hybrid && configured.handoffDir && sid && visible !== undefined && event.isAborted !== true) {
+    // Token-threshold orders remain opt-in. A ratio-forced cycle always continues,
+    // including when ENV or usage is unreadable. Interrupts never inject another order.
+    const justForced = sid ? forcedThisTurn.delete(sid) : false;
+    if (configured.handoffDir && sid && event.isAborted !== true) {
       try {
         const cwdNow = await resolvedCwd($);
         await handoffStep($ as unknown as HandoffHost, {
-          sessionId: sid, visible,
+          sessionId: sid, visible, thresholdsEnabled: hybrid, repeatForced: !justForced,
           config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
             handoffDir: await handoffRoots.resolve(cwdNow, sid, configured.handoffDir, text => log($, text)),
             handoffSkillPath: await handoffRoots.resolve(cwdNow, sid, configured.handoffSkillPath, text => log($, text)) },

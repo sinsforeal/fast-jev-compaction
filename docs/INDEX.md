@@ -1,5 +1,8 @@
 # Documents
 
+- [Jev loader compatibility checks, 2026-10-15](reports/JEV_LOADER_COMPAT_20261015.md).
+
+- [Forced written handoff floor release checks, 0.5.8, 2026-10-15](reports/FORCED_HANDOFF_FLOOR_20261015.md).
 - [Jev delivery wire correction, release 0.5.7, 2026-10-15](reports/LIVE_DELIVERY_20261015.md).
 - [Context bookkeeping reduction, release 0.5.6, 2026-10-15](reports/CONTEXT_BOOKKEEPING_20261015.md).
 

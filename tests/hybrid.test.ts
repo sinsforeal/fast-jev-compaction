@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { register, resolveHookConfig, estimateSessionTokens } from '../hooks/fast-jev.ts';
+import { register, resolveHookConfig, estimateSessionTokens, compactSession } from '../hooks/fast-jev.ts';
 import { handoffStep, checkLatest, type HandoffHost, type StepContext } from '../hooks/handoff.ts';
-import { compact, fitTarget, thresholdLadder, type JevAsker, type Message } from '../src/index.js';
+import { compact, fitTarget, messageChars, thresholdLadder, type JevAsker, type Message } from '../src/index.js';
 
 const m = (role: Message['role'], text: string, extra = {}): Message => ({ role, text, toolUses: [], ...extra });
 
@@ -299,7 +299,7 @@ describe('hook', () => {
     await c.handlers['turn.complete'](c.$, {}, async (e: any) => e);
     expect(c.$.session.compact).toHaveBeenCalledTimes(1);
   });
-  it('without DISABLE_AUTO_COMPACT=1 the hook keeps 0.4.4 behaviour: percent trigger, ratio miss falls through to next, no handoff', async () => {
+  it('without DISABLE_AUTO_COMPACT=1 the percent trigger stays, but a ratio miss forces handoff without next', async () => {
     const a = harness({ compactAtTokens: 150000, handoffDir: 'F:/handoffs' }, 300000, false);
     await a.handlers['turn.complete'](a.$, {}, async (e: any) => e);
     expect(a.$.session.compact).not.toHaveBeenCalled();
@@ -307,10 +307,11 @@ describe('hook', () => {
     const b = harness({ minReductionRatio: 1, handoffDir: 'F:/handoffs', targetVisibleTokens: 6000 }, 200000, false);
     const next = vi.fn(async () => ({ summary: true }));
     const out = await b.handlers['session.compact'](b.$, { trigger: 'auto', messages: b.rows }, next);
-    expect(next).toHaveBeenCalledTimes(1);
-    expect(out).toEqual({ summary: true });
-    expect(b.files.has(`F:/handoffs/${SID}/prune_skipped.json`)).toBe(false);
-    expect(b.logs.some(l => l.includes('fallback to built-in summary'))).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+    expect(out.skip).toContain('written handoff required');
+    expect(b.files.has(`F:/handoffs/${SID}/prune_skipped.json`)).toBe(true);
+    expect(JSON.parse(b.files.get(`F:/handoffs/${SID}/order.json`)!)).toMatchObject({ order: 'now', tokens: 200000 });
+    expect(b.logs.some(l => l.includes('fallback to built-in summary'))).toBe(false);
     expect(b.logs.some(l => l.includes('target fit'))).toBe(false);
   });
   it('Jev unavailable: a hybrid session skips with a marker and leaves the cut to the handoff; another session keeps the recovery cut', async () => {
@@ -355,7 +356,7 @@ function machine() {
       stat: async p => ({ kind: 'file', size: 1, mtimeMs: mtimes.get(p)! }) },
     store: { get: async k => store.get(k), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); }, delete: async k => { store.delete(k); } },
     prompt: { submit: async ({ text }) => { submits.push(text); } },
-    command: { run: async ({ command }) => { if (clearFails) throw new Error('no'); runs.push(command); id = 'new-session-id'; } },
+    command: { list: async () => [{ name: 'clear' }], run: async ({ command }) => { if (clearFails) throw new Error('no'); runs.push(command); id = 'new-session-id'; } },
   };
   host.process = fakeProcess(files);
   const pending: Promise<void>[] = [];

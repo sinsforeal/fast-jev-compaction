@@ -50,7 +50,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 
 ## Configuration
 
-The plugin declares these `userConfig` values in
+Release 0.5.8 declares these `userConfig` values in
 `.claude-plugin/plugin.json`:
 
 | Option | Default |
@@ -71,7 +71,7 @@ The plugin declares these `userConfig` values in
 | `targetVisibleTokens` | `64000` |
 | `handoffAt` | `250000` |
 | `handoffForceAt` | `300000` |
-| `handoffDir` | `var/handoffs` (relative = per tree, resolved once per session id against the cwd of the session's first event and cached, so a later `cd` never moves it; absolute = shared) |
+| `handoffDir` | `var/handoffs` (relative = per tree, cwd captured on the session's first compaction or turn-complete callback and cached, so a later `cd` never moves it; absolute = shared root) |
 | `handoffSkillPath` | `docs/HANDOFF_SKILL.md` (relative paths resolve like `handoffDir`) |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
@@ -81,39 +81,74 @@ development setup.
 Every option except `apiKey`, `compactAtPercent`, `compactAtTokens`,
 `targetVisibleTokens`, `handoffAt`, `handoffForceAt`, `handoffDir`,
 `handoffSkillPath`, `minReductionRatio`, `maxPostCompactTokens`, `logDecisions`
-and `model` is passed to the library; see the root README for what they do. The
-`session.compact` hook runs the Jev requests concurrently. Engine request
-failures, invalid results and local preparation failures log the reason and use
-deterministic transcript recovery. Text and calls stay; eligible older results
-are truncated with the existing evidence notes. The
-[root fidelity rules](../README.md#fidelity-rules) describe the policy.
-A `minReductionRatio` miss returns `{ skip }` and writes a marker file; the
-built-in summary is never requested. `targetVisibleTokens` re-decides the cut
-from the cached probabilities until the visible estimate is at or under it.
-`maxPostCompactTokens` only warns. The outcome includes the estimated visible
-post-cut size and the threshold used. Detailed kept/dropped probabilities, skip
-counts and text scores are logged only with `logDecisions: true`; arbitrary
-output and transport error bodies are omitted from diagnostics. The
-`turn.complete` hook requests compaction when `context.tokens` reaches
-`compactAtTokens` (or `context.percent` reaches `compactAtPercent` when the token
-value is unset), with an in-flight guard checked again after the usage read and a
-32000-token hysteresis after a prune or skip. It then runs the handoff step:
-orders at `handoffAt` and `handoffForceAt`, the clear and the resume once
-`<handoffDir>/<sessionId>/latest.md` is complete (see `handoff.ts`). Subagent
-completions cannot request a main-session cut. `precompute` is vetoed before
-network or UI work; it prepares a speculative result that the engine may never
-apply.
+and `model` is passed to the library; see the root README for what they do.
+The `session.compact` hook runs bounded Jev requests concurrently.
 
-Pending-order marker (0.5.5): while a SOON or NOW order is out, the machine keeps
-`<handoffDir>/<sessionId>/order.json` = `{ order: "soon"|"now", ts, tokens, limit, attempt }`
-(limit is `handoffAt` for soon, `handoffForceAt` for now), so a Stop hook has
-something on disk before `latest.md` exists. It is written to `order.json.tmp`
-and renamed through `$.process.run` (`$.fs` has no rename or delete), rewritten on
-every repeated order, and removed when the cycle ends: after the clear, from both
-the old and the new id folder, before the resume is submitted; also when the
-handoff is given up, the clear is blocked or the clear fails three times. If the
-process call is unavailable the file is written in place and removal rewrites it
-as `{"order":"none"}`. Sessions without the hybrid gate never get one.
+`DISABLE_AUTO_COMPACT=1` opts into the token trigger, cached-probability target
+fitting, skip-on-Jev-error policy and token-threshold handoff orders. In those
+sessions, request failures, invalid results and preparation failures retain
+context, write `prune_skipped.json` and leave handoff to the token thresholds.
+Other sessions use unscored deterministic transcript recovery: retain text and
+calls, truncate eligible older results with the existing evidence notes, then
+apply the same reduction gate. `targetVisibleTokens` does not apply there.
+The [root fidelity rules](../README.md#fidelity-rules) describe pin retention.
+
+Below `minReductionRatio` (default 0.25), the hook returns `{ skip }`, retains
+history and pins, writes `prune_skipped.json` and immediately requests a written
+HANDOFF NOW. Exactly 25% passes at the default floor. The ratio force applies
+with the flag present, missing, another value or unreadable; token thresholds
+and unreadable usage never delay it. It also applies to recovery cuts and cuts
+that fall below the floor after late deliveries are restored. There is no call
+to the built-in summary. Keep the launcher flag set so the harness's own
+automatic compaction stays disabled too.
+
+`maxPostCompactTokens` only warns. Outcomes report estimated visible post-cut
+size and the threshold used. Kept/dropped probabilities, skip counts and text
+scores require `logDecisions: true`. Arbitrary output and transport error bodies
+are omitted. Ratio-force notices are deduplicated per session per registration.
+
+`turn.complete` requests compaction at `compactAtTokens` only with the launcher
+flag and a readable token count; otherwise it uses `compactAtPercent`. The
+in-flight guard is checked again after the usage read. A prune or skip sets a
+32000-token hysteresis when a count is available. Subagent completions cannot
+request a main-session cut. `precompute` is vetoed before network or UI work;
+a disk-only callback receipt may still be written.
+
+The handoff state in `$.store` persists a ratio `forceReason` and its bounded
+repeat budget. It survives callback re-registration and lost flag/usage reads.
+The compaction callback requests NOW but cannot clear or repeat an outstanding
+order. Later non-aborted main-loop completions validate the file and continue
+the cycle, including outside the token-trigger opt-in. The first completion
+following an immediate force does not duplicate NOW. Later incomplete files
+allow at most 3 NOW repeats; then the machine logs "handoff not written" and
+retains context. Aborted completions neither repeat nor clear.
+
+Before clear, `latest.md` must be a regular file newer than the latest order.
+The first 10 lines must name the exact session id, not a prefix/suffix match;
+the last non-empty line must be `COMPLETE`. Mtime and size must stay unchanged
+across the read. `$.command.list()` must list `clear`. After the detached delay,
+the machine checks session id and file again, writes `resumed.json`, logs the
+clear, then validates the file and checks the session id immediately before
+`$.command.run`. A changed session or a replacement with different mtime/size
+retains context, even when the file still ends in COMPLETE. The resumed marker
+can exist after these final checks reject clear; it is not proof of a clear.
+Missing/unreadable clear capability blocks
+clear; clear failures stop at 3 attempts. No failure authorizes a summary or a
+RESUME without a successful clear. After clear, the machine follows any changed
+session id, copies latest.md and resumed.json, writes `current_session.json` and
+submits HANDOFF RESUME. See `handoff.ts` and the root handoff flow.
+
+While a SOON or NOW order is out, the machine keeps
+`<handoffDir>/<sessionId>/order.json` with `order`, `ts`, `tokens`, `limit` and
+`attempt`, plus `reason` for ratio-forced orders. `tokens` is actual usage or
+`null`, never a fabricated threshold. `limit` remains `handoffAt` for SOON or
+`handoffForceAt` for NOW, even when a ratio force bypasses that limit. Stop hooks
+can read it before latest.md exists. Write `order.json.tmp`, then rename through
+`$.process.run` (`$.fs` has no rename or delete). Rewrite on repeated orders;
+remove after clear in both old and new folders before RESUME, on give-up, on
+blocked clear or after 3 clear failures. Without the process call, write in
+place and rewrite removal as `{"order":"none"}`. Ratio-forced cycles write this
+marker regardless of the launcher flag.
 
 The first actual cut after start/reload uses Jev's handleless rebuild. Observers
 pin accepted prompt text/context and rendered deliveries; all append doors
@@ -140,6 +175,14 @@ Routine opaque-block receipts do not fill the transcript UI. Cut summaries,
 applied token measurements, errors and fidelity-gap warnings still appear there.
 The UI diagnostics themselves are not sent as model context. All receipts remain
 in `~/.claude/fast-jev-compaction.log`; log failures never alter the cut.
+
+The first registered callback per session writes a disk-only `module-loaded`
+receipt with `hook=fast-jev-compaction@0.5.8/forced-handoff-floor`, the full session
+id and `DISABLE_AUTO_COMPACT=1|unset|other|unreadable`. It never logs an arbitrary
+environment value or error. Registration alone writes nothing; callback reload
+may emit a new receipt for the same session. Require a fresh intended-session
+receipt after installing 0.5.8. Native scanner validation and an actual handoff
+clear/resume are separate runtime checks, not proven by the unit suite.
 
 Text recognition is a heuristic based on known harness wrappers. Fenced examples
 and untagged user text are preserved; unfenced user text imitating those wrappers

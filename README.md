@@ -65,7 +65,9 @@ built-in compaction summary with the original messages.
    thinking and media. A non-text placeholder records an otherwise empty result.
 
 Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+fitted throw in the library. The hook retains context in hybrid sessions and uses
+unscored transcript recovery otherwise. A recovery cut still has to meet the
+reduction floor. No hook path requests the built-in summary.
 
 ## Install and usage
 
@@ -91,7 +93,7 @@ const transcript: Message[] = [
 const result = await compactMessages(transcript, { preserveRecentMessages: 4 });
 console.log(result.messages, result.decisions, result.stats);
 if (reductionRatio(result) < 0.25) {
-  // not worth it: keep the original transcript, or summarize instead
+  // Keep the original transcript and request a written handoff instead.
 }
 ```
 
@@ -126,30 +128,31 @@ put it in a source file.
 | `maxPostCompactTokens` | `0` | Hook only: warn above estimated visible size; never triggers summary; 0 disables warning |
 | `logDecisions` | `false` | Hook only: opt-in kept/dropped probabilities and text decisions |
 
-### 0.5.0 plugin options (read in `register`, from `pluginConfigs`)
+### Plugin options (read in `register`, from `pluginConfigs`)
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `compactAtTokens` | `160000` | turn.complete requests a prune when `context.tokens` >= this. When it is above 0 it replaces `compactAtPercent`; set `0` to use the percent trigger (also used when the token count is unreadable) |
-| `compactAtPercent` | `60` | legacy trigger, percent of the model window; ignored while `compactAtTokens` > 0 |
-| `targetVisibleTokens` | `64000` | real post-cut target: after the first Jev pass the plugin raises `keepThreshold` over the cached probabilities (steps of 0.05, then once past 1; no new Jev request) until `estimateSessionTokens` is at or under it. If the floor (pins, user prompts, short replies) is still above it, `replyMinChars` and `injectedMinChars` are halved once (floors 1100 / 200; newly eligible blocks are abridged or removed unscored) and the sweep repeats. The log line reports achieved size, threshold, floor stage. 0 disables |
+| `compactAtTokens` | `160000` | With `DISABLE_AUTO_COMPACT=1`, turn.complete requests a prune when readable `context.tokens` >= this. Above 0 it replaces `compactAtPercent`; `0`, missing/unreadable token counts, or a missing/unreadable launcher flag use the percent trigger |
+| `compactAtPercent` | `60` | Percent-of-window trigger when the hybrid token trigger does not apply |
+| `minReductionRatio` | `0.25` | Strictly below this actual character reduction, skip the cut and immediately force a written HANDOFF NOW, independent of launcher flag and token thresholds. Exactly equal passes. Never requests a built-in summary |
+| `targetVisibleTokens` | `64000` | With `DISABLE_AUTO_COMPACT=1` only: after the first Jev pass, raise `keepThreshold` over cached probabilities (steps of 0.05, then once past 1; no new Jev request) until `estimateSessionTokens` is at or under the target. If pins, user prompts and short replies still exceed it, halve `replyMinChars` and `injectedMinChars` once (floors 1100 / 200), then repeat the sweep. Newly eligible blocks are abridged or removed unscored. Logs report achieved size, threshold and floor stage. 0 disables |
 | `maxPostCompactTokens` | `0` | legacy: only a warning above this estimate. Independent of the target |
-| `handoffAt` | `250000` | visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |
-| `handoffForceAt` | `300000` | visible size at which HANDOFF NOW is ordered (raised to `handoffAt` if lower) |
-| `handoffDir` | `var/handoffs` | the session's files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`); `<handoffDir>/current_session.json` follows the id. A relative dir resolves against the session cwd, so each tree keeps its own store (per tree); an absolute dir is one store shared by every session |
-| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | path cited in the orders; relative paths resolve against the session cwd |
+| `handoffAt` | `250000` | With `DISABLE_AUTO_COMPACT=1`: visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |
+| `handoffForceAt` | `300000` | With `DISABLE_AUTO_COMPACT=1`: visible size at which HANDOFF NOW is ordered (raised to `handoffAt` if lower). A ratio miss forces NOW regardless of this size |
+| `handoffDir` | `var/handoffs` | Session files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`, `order.json`); `<handoffDir>/current_session.json` follows the id. Relative paths use the cwd captured on the session's first compaction or turn-complete callback, cached per session id; later cwd changes do not move the files. Absolute paths share one root |
+| `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | Path cited in the orders; relative paths use the same captured cwd as `handoffDir` |
 
-The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, leaves the context as it is and writes `prune_skipped.json`; `compactTranscript` stays the offline recovery on transport failure. Every log line starts with `[first 8 chars of the session id]`.
+The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, retains history and pins, writes `prune_skipped.json` and requests HANDOFF NOW immediately. This applies when `DISABLE_AUTO_COMPACT` is `1`, missing, another value or unreadable, even below the token thresholds or without usage counts. The persisted force reason continues the cycle after callback reload or loss of the flag. Every log line starts with `[first 8 chars of the session id]`.
 
-Handoff flow (needs `DISABLE_AUTO_COMPACT=1` on the launcher; harness side):
-1. After each main-loop turn, visible = post-cut estimate if a prune ran, else `context.tokens`.
-2. At `handoffAt` the plugin submits HANDOFF SOON (once per 50000 more tokens); at `handoffForceAt` HANDOFF NOW.
-3. The model writes `<handoffDir>/<sessionId>/latest.md`, header naming the session id, last line `COMPLETE`.
-4. On a later turn the plugin accepts it only if it is newer than the order, names this session and ends in COMPLETE.
-5. It writes `resumed.json` { by, file, mtime (ms), at }, then runs `/clear` (after checking `$.command.list()` has it).
-6. It reads `$.session.id()` again; if changed it copies latest.md and resumed.json to the new id's folder; either way it writes `current_session.json`.
-7. It submits HANDOFF RESUME naming latest.md and the skill's Resume section.
-8. Not complete after NOW: the order repeats once per turn, 3 repeats at most, then "handoff not written" is logged and pruning goes on. Never a clear without a complete file.
+Handoff flow:
+1. After a non-aborted main-loop turn, visible = post-cut estimate if a prune ran, else actual `context.tokens` when available. Token-threshold orders require `DISABLE_AUTO_COMPACT=1`; ratio-forced orders do not.
+2. At `handoffAt` submit HANDOFF SOON (once per 50000 more tokens); at `handoffForceAt` submit HANDOFF NOW. A ratio miss queues NOW from the compaction callback without waiting for a threshold. That callback cannot clear or repeat an outstanding order.
+3. Pending orders write `order.json` with `order`, `ts`, actual `tokens` (or `null`), configured `limit`, `attempt` and, for ratio-forced orders, `reason`. No token count is fabricated to cross the force threshold.
+4. The model writes `<handoffDir>/<sessionId>/latest.md`. Its first 10 lines must name the exact session id, not a prefix or suffix match. Its last non-empty line must be `COMPLETE`.
+5. On a later non-aborted main-loop completion, accept only a regular file newer than the latest order. Stat before and after reading; its mtime and size must stay unchanged. Check that `$.command.list()` lists `clear`, then queue the detached clear.
+6. After the detached delay, check the session id and file again. Write `resumed.json` with `{ by, file, mtime, at }`, log the pending clear, then revalidate the file and session id immediately before `$.command.run({ command: "clear" })`. The file must still be valid and have the same mtime and size as the version recorded in `resumed.json`. Any invalid/replaced file or changed session retains context. The marker is written before these final checks, so its presence alone does not prove a clear.
+7. Read `$.session.id()` after clear. If changed, copy latest.md and resumed.json into the new id's folder. Write `current_session.json`, remove pending-order markers and submit HANDOFF RESUME naming latest.md and the skill's Resume section.
+8. Missing or invalid files cause at most 3 later NOW repeats, one per completion, after the initial order. The completion that first forced NOW does not duplicate it. Aborted turns neither repeat nor clear. After the repeat budget, log "handoff not written" and retain context. A missing/unreadable clear capability blocks clear; a failing clear gets at most 3 attempts. Neither path requests a summary or submits RESUME without a successful clear.
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -216,26 +219,33 @@ and recover only text spans not already represented. Every choice is logged.
 Observer content gaps keep whatever text the transcript exposes and log the gap.
 
 Request failures after retry, missing keys, invalid engine results and local
-preparation failures use deterministic transcript recovery: preserve all text,
-calls, pinned/recent results, and truncate eligible older results using the
-existing head/evidence-note policy. Recovery is explicitly unscored. It passes
-through the same reduction gate; a missed ratio skips the cut (`{ skip }`), writes
-`<handoffDir>/<sessionId>/prune_skipped.json` and never requests the built-in
-summary. `targetVisibleTokens` counts the visible messages only, so the real
-context after a prune is the target plus the system and tool prefix.
+preparation failures retain context when `DISABLE_AUTO_COMPACT=1`. They write
+`prune_skipped.json`; token-threshold handoff orders still apply. Other sessions
+use deterministic transcript recovery: preserve text, calls and pinned/recent
+results, then truncate eligible older results with the existing head/evidence-note
+policy. Recovery is explicitly unscored and passes the same reduction gate.
+A miss there also retains history and forces a written handoff immediately.
+No failure path requests the built-in summary. `targetVisibleTokens` applies
+only with the launcher flag and counts visible messages, not the system/tool prefix.
 
 A host without `session.compact` has no supported replacement installation API.
 The usage hook logs that incompatibility and requests no built-in summary.
 Such a host needs a compatible runtime before it can apply Jev replacements.
 
-Every skip and recovery toasts its reason. With `logDecisions: true`,
-the decision log also includes cumulative session-local skip counts by reason,
-alongside kept/dropped probabilities. Error bodies and credentials are omitted.
-Recovery reasons and chronology decisions also go to
-`~/.claude/fast-jev-compaction.log`. Routine opaque-block receipts go only to this
-disk log; cut summaries, applied measurements, errors and fidelity-gap warnings
-remain visible. UI log lines are transcript diagnostics, not model context.
-Disk/UI failures never change a cut.
+Skips and recovery report their reasons; repeated ratio-force notices are deduplicated
+per session per callback registration. With `logDecisions: true`, the decision log
+also includes cumulative session-local skip counts by reason, alongside kept/dropped
+probabilities. Error bodies and credentials are omitted. Recovery reasons and
+chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
+
+The first callback for each session per registration writes a disk-only receipt:
+`module-loaded hook=fast-jev-compaction@0.5.8/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
+value or error body. A cache or manifest version alone is not a loaded receipt.
+Callback re-registration can emit another receipt for the same session.
+Routine opaque-block receipts also stay on disk; cut summaries, applied measurements,
+errors and fidelity-gap warnings remain visible. UI log lines are transcript
+diagnostics, not model context. Disk/UI failures never change a cut.
 Speculative `precompute` remains vetoed.
 
 ### Install in Claude Code
@@ -263,12 +273,19 @@ plugin's own token trigger go through Jev: the toast reads
 when the hook returns a replacement, or `[sid] skipped (…)` when Jev does not meet
 the configured reduction ratio. The built-in summary is never requested. Run with
 `DISABLE_AUTO_COMPACT=1` so the harness's own compaction stays out of the loop.
-The same variable is the plugin's session gate: without it the hook behaves as 0.4.4 did (percent trigger, a ratio miss falls through to the harness summary, no handoff orders), so installing 0.5.0 changes nothing in sessions that did not opt in.
+The flag opts into the token trigger, target fitting, skip-on-Jev-error policy and
+token-threshold handoff orders. Missing or unreadable flags use the percent trigger
+and unscored recovery on Jev errors. They never restore summary fallback: every
+ratio miss still forces a written handoff. Keep the flag set to disable the harness's
+own automatic compaction; the plugin cannot disable an independent harness path.
 
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.7 before reloading.
+Confirm both marketplace and cached plugin manifests say 0.5.8 before reloading,
+then require a fresh callback `module-loaded` receipt for the intended full session id.
+Native function-hook scanning and a live handoff remain separate install checks;
+unit tests and a version string do not prove either.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

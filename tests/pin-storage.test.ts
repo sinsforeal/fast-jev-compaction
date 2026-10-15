@@ -160,7 +160,8 @@ it('preserves fingerprints of the input if the engine rejects the prepared repla
 it('does not write provenance for a reduction-ratio skip', async () => {
   const h = harness(undefined, 'session-a', { minReductionRatio: 1 }); h.setRows(legacy(initial()));
   expect((await h.cut()).skip).toBeDefined();
-  expect(h.$.store.set).not.toHaveBeenCalled();
+  expect(h.$.store.set.mock.calls.some(([key]) => key.startsWith('delivery-pins:'))).toBe(false);
+  expect(h.$.store.set).toHaveBeenCalledWith('handoff:session-a', expect.objectContaining({ forceReason: expect.stringContaining('below 100% minimum') }));
 });
 
 it('stores late arrivals before installing history and preserves them after restart', async () => {
