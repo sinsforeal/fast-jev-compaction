@@ -30,6 +30,8 @@ export type HandoffHost = {
     run: (input: { command: string; args?: string }) => Promise<unknown>;
     list: () => Promise<readonly { name: string }[]>;
   };
+  /** 0.5.5: `$.process.run`, used only to rename and delete the order marker (`$.fs` has neither). */
+  process?: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number }> };
 };
 
 /** Per-session record under `handoff:<sessionId>` in `$.store`. */
@@ -42,6 +44,8 @@ export type HandoffState = {
   forcedOrders: number;
   /** "handoff not written" was logged; no more orders, pruning goes on. */
   gaveUp?: boolean;
+  /** SOON orders sent (the marker's attempt number for a SOON). */
+  soonOrders?: number;
   /** Clear or resume attempts that failed; capped. */
   clearFailures: number;
   /** The clear is not available on this host (logged once). */
@@ -66,6 +70,50 @@ export function resolveAgainstCwd(cwd: string | undefined, path: string): string
 export function sessionFile(dir: string, sessionId: string, name: string): string {
   const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
   return `${dir.replace(/[\\/]+$/, '')}${sep}${sessionId}${sep}${name}`;
+}
+
+const onWindows = (): boolean => (globalThis as { process?: { platform?: string } }).process?.platform === 'win32';
+const nativePath = (path: string): string => (onWindows() ? path.replace(/\//g, '\\') : path);
+
+/** Runs one process step; true when it exited 0. No `$.process` or a throw counts as false. */
+async function runStep(host: HandoffHost, argv: string[]): Promise<boolean> {
+  try { return !!host.process && (await host.process.run(argv, { timeoutMs: 5000 })).exitCode === 0; } catch { return false; }
+}
+
+/**
+ * 0.5.5: `<handoffDir>/<sid>/order.json` { order, ts, tokens, limit, attempt } while a SOON or NOW
+ * order is pending, so a Stop hook has something on disk to read before latest.md exists.
+ * Written to a temp file, then renamed over order.json (`$.process.run`; `$.fs` has no rename).
+ * Without a process the marker is written in place. Never throws.
+ */
+export async function writeOrderMarker(
+  host: HandoffHost, dir: string, sessionId: string,
+  marker: { order: 'soon' | 'now'; tokens: number; limit: number; attempt: number },
+): Promise<string> {
+  const path = sessionFile(dir, sessionId, 'order.json');
+  try {
+    const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens, limit: marker.limit, attempt: marker.attempt });
+    const tmp = `${path}.tmp`;
+    await host.fs.write(tmp, body);
+    const moved = await runStep(host, onWindows()
+      ? ['cmd', '/c', 'move', '/Y', nativePath(tmp), nativePath(path)]
+      : ['mv', '-f', tmp, path]);
+    if (!moved) await host.fs.write(path, body);
+  } catch { /* the marker is a convenience; the order goes on */ }
+  return path;
+}
+
+/** Removes order.json of one session folder. If the delete cannot run, the file is rewritten as {"order":"none"}. */
+export async function clearOrderMarker(host: HandoffHost, dir: string, sessionId: string, log?: (text: string) => Promise<void>): Promise<void> {
+  const path = sessionFile(dir, sessionId, 'order.json');
+  try {
+    if (!(await host.fs.exists(path))) return;
+    const gone = await runStep(host, onWindows() ? ['cmd', '/c', 'del', '/F', '/Q', nativePath(path)] : ['rm', '-f', path]);
+    if (!gone) {
+      await host.fs.write(path, JSON.stringify({ order: 'none', ts: new Date().toISOString() }));
+      await log?.(`handoff: could not delete ${path}; rewrote it as order none`);
+    }
+  } catch { /* leave it */ }
 }
 
 export function soonOrder(visible: number, config: HandoffConfig, latest: string): string {
@@ -152,7 +200,7 @@ async function clearAvailable(host: HandoffHost): Promise<boolean> {
 async function followSessionId(
   host: HandoffHost, dir: string, previous: string, latest: string, log: (text: string) => Promise<void>,
   onIdChanged?: (previous: string, id: string) => void,
-): Promise<void> {
+): Promise<string | undefined> {
   try {
     const id = await host.session.id();
     if (id !== previous) {
@@ -168,8 +216,10 @@ async function followSessionId(
     }
     await host.fs.write(`${dir.replace(/[\\/]+$/, '')}${dir.includes('\\') && !dir.includes('/') ? '\\' : '/'}current_session.json`,
       JSON.stringify({ id, previous_id: previous, at: new Date().toISOString() }));
+    return id;
   } catch {
     await log('handoff: session id could not be read after the clear');
+    return undefined;
   }
 }
 
@@ -190,6 +240,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
         state.clearBlocked = true;
         await save(host, sessionId, state);
         await log(`handoff complete but the host lists no runnable "clear" command; session left as it is (live check owed)`);
+        await clearOrderMarker(host, dir, sessionId, log);
         return;
       }
       // resumed.json first: the SessionStart hook skips a file this names.
@@ -206,9 +257,13 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           again.clearFailures += 1;
           await save(host, sessionId, again);
           await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}); will retry on the next turn`);
+          if (again.clearFailures >= MAX_CLEAR_FAILURES) await clearOrderMarker(host, dir, sessionId, log);
           return;
         }
-        await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
+        const newId = await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
+        // 0.5.5: the cycle is over; neither folder keeps an order marker when the resume goes out.
+        await clearOrderMarker(host, dir, sessionId, log);
+        if (newId && newId !== sessionId) await clearOrderMarker(host, dir, newId, log);
         await log('handoff cleared the session; submitting the resume order');
         try {
           await host.prompt.submit({ text: resumeOrder(latest, config) });
@@ -226,11 +281,14 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
         state.orderAt = await host.clock.now();
         await save(host, sessionId, state);
         await log(`handoff order repeated (${state.forcedOrders - 1} of ${MAX_FORCED_REPEATS}); file not complete: ${check.reason}`);
+        const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders });
+        await log(`handoff order marker rewritten: ${marker} (now, attempt ${state.forcedOrders}, ${visible}/${config.handoffForceAt})`);
         const text = nowOrder(visible, config, latest);
         detach(async () => { await pause(host); await host.prompt.submit({ text }); });
       } else {
         state.gaveUp = true;
         await save(host, sessionId, state);
+        await clearOrderMarker(host, dir, sessionId, log);
         await log(`handoff not written (${latest}: ${check.reason}) after ${state.forcedOrders} forced orders; pruning goes on, no clear`);
       }
       return;
@@ -245,7 +303,8 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
       state.forcedOrders = 1;
       state.orderAt = await host.clock.now();
       changed = true;
-      await log(`handoff order NOW at ~${visible} tokens (limit ${config.handoffForceAt}); expecting ${latest}`);
+      const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders });
+      await log(`handoff order NOW at ~${visible} tokens (limit ${config.handoffForceAt}); marker ${marker} (order now); expecting ${latest}`);
       const text = nowOrder(visible, config, latest);
       await save(host, sessionId, state);
       detach(async () => { await pause(host); await host.prompt.submit({ text }); });
@@ -257,7 +316,9 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
     state.lastSoonAt = visible;
     state.orderAt = await host.clock.now();
     changed = true;
-    await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}); expecting ${latest}`);
+    state.soonOrders = (state.soonOrders ?? 0) + 1;
+    const marker = await writeOrderMarker(host, dir, sessionId, { order: 'soon', tokens: visible, limit: config.handoffAt, attempt: state.soonOrders });
+    await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}); marker ${marker} (order soon); expecting ${latest}`);
     const text = soonOrder(visible, config, latest);
     await save(host, sessionId, state);
     detach(async () => { await pause(host); await host.prompt.submit({ text }); });

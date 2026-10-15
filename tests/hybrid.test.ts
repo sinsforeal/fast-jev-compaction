@@ -63,6 +63,21 @@ describe('options', () => {
 
 // ---- hook: skip path, log prefix, trigger precedence --------------------------
 const SID = 'abcdef12-0000-4000-8000-000000000000';
+/** Fake `$.process.run` over a file map: mv/move renames, rm/del deletes (the two calls the marker makes). */
+function fakeProcess(files: Map<string, string>, log: string[][] = []) {
+  const norm = (p: string) => p.replace(/\\/g, '/');
+  return { run: async (argv: readonly string[]) => {
+    log.push([...argv]);
+    const verb = argv.find(a => ['mv', 'move', 'rm', 'del'].includes(a));
+    if (verb === 'mv' || verb === 'move') {
+      const [from, to] = argv.slice(-2).map(norm);
+      if (!files.has(from)) return { exitCode: 1 };
+      files.set(to, files.get(from)!); files.delete(from);
+    } else if (verb === 'rm' || verb === 'del') files.delete(norm(argv.at(-1)!));
+    else return { exitCode: 1 };
+    return { exitCode: 0 };
+  } };
+}
 function harness(options = {}, tokens: number | undefined = 200000, hybrid = true, cwd?: string | (() => string), sid = SID) {
   const handlers: Record<string, Function> = {};
   register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, ...options });
@@ -75,6 +90,7 @@ function harness(options = {}, tokens: number | undefined = 200000, hybrid = tru
     store: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => { store.set(k, v); }, delete: async (k: string) => { store.delete(k); } },
     prompt: { submit: vi.fn(async () => ({})) }, command: { run: vi.fn(async () => ({})), list: async () => [{ name: 'clear' }] },
     session: { id: async () => (typeof sid === 'function' ? (sid as () => string)() : sid), cwd: async () => { if (cwd === undefined) throw new Error('no cwd'); return typeof cwd === 'function' ? cwd() : cwd; }, usage: vi.fn(async () => ({ context: { tokens, percent: 1 } })), messages: async () => rows, compact: vi.fn(async () => ({ messages: [] })) } };
+  $.process = fakeProcess(files);
   return { handlers, files, logs, $, rows };
 }
 describe('handoffDir resolution', () => {
@@ -93,6 +109,74 @@ describe('handoffDir resolution', () => {
     await h.handlers['session.compact'](h.$, { trigger: 'plugin', messages: h.rows }, vi.fn());
     expect([...h.files.keys()]).toContain(`F:/handoffs/${SID}/prune_skipped.json`);
     expect([...h.files.keys()].some(k => k.startsWith('F:/tree_a'))).toBe(false);
+  });
+});
+describe('pending-order marker order.json (0.5.5)', () => {
+  const OLD = 'a0a0a0a0-0000-4000-8000-0000000000a0'; const NEW = 'b1b1b1b1-0000-4000-8000-0000000000b1';
+  const turn = async (h: ReturnType<typeof harness>) => { await h.handlers['turn.complete'](h.$, {}, async (e: any) => e); await new Promise(r => setTimeout(r, 5)); };
+  const read = (h: ReturnType<typeof harness>, path: string) => JSON.parse(h.files.get(path)!);
+  const marker = (root: string, id: string) => `${root}/${id}/order.json`;
+  it('SOON writes the marker with order, ts, tokens, limit and attempt; no temp file is left', async () => {
+    const h = harness({ handoffAt: 150000, handoffForceAt: 300000, handoffDir: 'F:/h' }, 200000, true, 'F:/t', OLD);
+    await turn(h);
+    expect(read(h, marker('F:/h', OLD))).toMatchObject({ order: 'soon', tokens: 200000, limit: 150000, attempt: 1 });
+    expect(Number.isNaN(Date.parse(read(h, marker('F:/h', OLD)).ts))).toBe(false);
+    expect([...h.files.keys()].some(k => k.endsWith('.tmp'))).toBe(false);
+    expect(h.logs.some(l => l.includes('handoff order SOON') && l.includes(`marker ${marker('F:/h', OLD)} (order soon)`))).toBe(true);
+  });
+  it('NOW writes the marker, a repeated order rewrites it with the next attempt', async () => {
+    const h = harness({ handoffAt: 90000, handoffForceAt: 100000, handoffDir: 'F:/h' }, 200000, true, 'F:/t', OLD);
+    await turn(h);
+    expect(read(h, marker('F:/h', OLD))).toMatchObject({ order: 'now', tokens: 200000, limit: 100000, attempt: 1 });
+    h.files.set(marker('F:/h', OLD), 'stale');
+    await turn(h);
+    expect(read(h, marker('F:/h', OLD))).toMatchObject({ order: 'now', limit: 100000, attempt: 2 });
+    expect(h.logs.some(l => l.includes('order marker rewritten') && l.includes('attempt 2'))).toBe(true);
+  });
+  it('after the clear neither the old nor the new id folder holds a marker, also when the resume goes out', async () => {
+    let id = OLD;
+    const h = harness({ handoffAt: 90000, handoffForceAt: 100000 }, 200000, true, 'F:/tree_a', (() => id) as any);
+    h.$.fs.stat = async () => ({ kind: 'file', size: 1, mtimeMs: 5000 });
+    let atResume: string[] = [];
+    h.$.command.run = vi.fn(async () => { id = NEW; return {}; });
+    h.$.prompt.submit = vi.fn(async ({ text }: any) => { if (text.startsWith('HANDOFF RESUME')) atResume = [...h.files.keys()].filter(k => k.endsWith('order.json')); return {}; });
+    await turn(h);
+    const root = 'F:/tree_a/var/handoffs';
+    expect(h.files.has(marker(root, OLD))).toBe(true);
+    h.files.set(marker(root, NEW), '{"order":"now"}'); // even a stray one under the new id goes
+    h.files.set(`${root}/${OLD}/latest.md`, `# Handoff for session ${OLD}\nbody\nCOMPLETE\n`);
+    await turn(h);
+    expect(h.$.command.run).toHaveBeenCalledTimes(1);
+    expect(atResume).toEqual([]);
+    expect([...h.files.keys()].filter(k => k.endsWith('order.json'))).toEqual([]);
+  });
+  it('a handoff given up after the forced repeats removes the marker', async () => {
+    const h = harness({ handoffAt: 90000, handoffForceAt: 100000, handoffDir: 'F:/h' }, 200000, true, 'F:/t', OLD);
+    for (let i = 0; i < 6; i++) await turn(h);
+    expect(h.logs.some(l => l.includes('handoff not written'))).toBe(true);
+    expect(h.files.has(marker('F:/h', OLD))).toBe(false);
+  });
+  it('no marker without the hybrid gate (DISABLE_AUTO_COMPACT unset)', async () => {
+    const h = harness({ handoffAt: 90000, handoffForceAt: 100000, handoffDir: 'F:/h' }, 200000, false, 'F:/t', OLD);
+    await turn(h);
+    expect([...h.files.keys()].some(k => k.endsWith('order.json'))).toBe(false);
+  });
+  it('a cwd that drifted still gets the marker under the captured root', async () => {
+    let cwd = 'F:/tree_a';
+    const h = harness({ handoffAt: 90000, handoffForceAt: 100000 }, 200000, true, () => cwd, OLD);
+    await turn(h);
+    cwd = 'F:/tree_a/var/handoffs';
+    await turn(h);
+    const keys = [...h.files.keys()].filter(k => k.endsWith('order.json'));
+    expect(keys).toEqual([marker('F:/tree_a/var/handoffs', OLD)]);
+    expect(read(h, keys[0])).toMatchObject({ order: 'now', attempt: 2 });
+  });
+  it('without $.process the marker is still written in place and removal leaves {"order":"none"}', async () => {
+    const t = machine(); (t as any).dropProcess();
+    await t.step(310000);
+    expect(JSON.parse(t.files.get(`${DIR}/${SID}/order.json`)!)).toMatchObject({ order: 'now', attempt: 1 });
+    t.write(good); await t.step(310000);
+    expect(JSON.parse(t.files.get(`${DIR}/${SID}/order.json`)!)).toMatchObject({ order: 'none' });
   });
 });
 describe('handoff root is captured once per session (0.5.4)', () => {
@@ -273,6 +357,7 @@ function machine() {
     prompt: { submit: async ({ text }) => { submits.push(text); } },
     command: { run: async ({ command }) => { if (clearFails) throw new Error('no'); runs.push(command); id = 'new-session-id'; } },
   };
+  host.process = fakeProcess(files);
   const pending: Promise<void>[] = [];
   const step = async (visible: number) => {
     const ctx: StepContext = { host, sessionId: SID, visible, log: async t => { logs.push(t); }, detach: w => { pending.push(w()); },
@@ -280,7 +365,7 @@ function machine() {
     await handoffStep(ctx.host, ctx); await Promise.all(pending.splice(0));
   };
   const write = (body: string) => { now += 10; files.set(LATEST, body); mtimes.set(LATEST, now); };
-  return { step, files, submits, runs, logs, store, write, tick: (n: number) => { now += n; }, failClear: (v: boolean) => { clearFails = v; } };
+  return { step, files, submits, runs, logs, store, write, dropProcess: () => { delete host.process; }, tick: (n: number) => { now += n; }, failClear: (v: boolean) => { clearFails = v; } };
 }
 const good = `# Handoff for session ${SID}\nbody\nCOMPLETE\n`;
 
