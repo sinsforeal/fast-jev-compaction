@@ -14,6 +14,6 @@ export type DeliveryAppend = {
 
 export type DeliveryOn = (
   name: 'session.append',
-  handler: ($: { session: { messages: () => Promise<import('claude-code').SessionMessage[]> } },
+  handler: ($: { session: { id: () => Promise<string>; messages: () => Promise<import('claude-code').SessionMessage[]> } },
     event: DeliveryAppend, next: (event: DeliveryAppend) => Promise<DeliveryAppend | { deny: string }>) => Promise<DeliveryAppend | { deny: string }>,
 ) => unknown;

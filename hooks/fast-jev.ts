@@ -14,7 +14,8 @@ import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
 import { recoverApiHistory, type RuntimeMessages } from './api-history.js';
-import { readPinProvenance, persistPinProvenance, pinProvenanceTexts } from './pin-provenance.js';
+import { readPinProvenance, appendPinProvenance, pinProvenanceTexts, collectPins,
+  pinStoreKey, readPinRecord, mergePins, type Pin } from './pin-provenance.js';
 import {
   buildJevRequest,
   DEFAULT_MODEL,
@@ -220,6 +221,7 @@ export function toSessionMessages(
   input: readonly SessionMessage[],
   output: readonly Message[],
   pinned?: Set<number>,
+  policies?: Map<number, Message['notificationText']>,
 ): SessionMessage[] {
   const rebuiltMessages: SessionMessage[] = [];
   for (const message of output) {
@@ -246,7 +248,10 @@ export function toSessionMessages(
       last.toolUses.push(...rebuilt.toolUses);
       if (rebuilt.toolResults?.length) last.toolResults = [...(last.toolResults ?? []), ...rebuilt.toolResults];
     } else rebuiltMessages.push(rebuilt);
-    if (message.pinned && message.role === 'user') pinned?.add(rebuiltMessages.length - 1);
+    if (message.pinned && message.role === 'user') {
+      pinned?.add(rebuiltMessages.length - 1);
+      if (message.notificationText) policies?.set(rebuiltMessages.length - 1, message.notificationText);
+    }
   }
   return rebuiltMessages;
 }
@@ -265,6 +270,7 @@ export function estimateSessionTokens(messages: readonly Message[]): number {
 export type SessionCompaction = {
   result: CompactResult;
   messages: SessionMessage[];
+  pins?: Pin[];
 };
 
 /** Offline recovery uses only the transcript: preserve every call and text,
@@ -503,11 +509,19 @@ async function resolvedCwd($: CwdHost): Promise<string | undefined> {
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
-  const ledger = new FidelityLedger();
+  const ledgers = new Map<string, FidelityLedger>();
+  const ledgerFor = (sid: string): FidelityLedger => {
+    let ledger = ledgers.get(sid);
+    if (!ledger) { ledger = new FidelityLedger(); ledgers.set(sid, ledger); }
+    return ledger;
+  };
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
+      let sid = '';
+      try { sid = await $.session.id(); } catch { /* legacy host */ }
+      const ledger = ledgerFor(sid);
       // All doors supply UUID chronology; only deliveries become pinned rows.
       // $.session.messages is main-only: never use it to place a child's row.
       let snapshot: SessionMessage[] = [];
@@ -523,12 +537,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
   }
 
   on('prompt.submit', async ($, event, next) => {
-    const relevant = event.turnId !== undefined || !!event.attachments?.length;
+    let sid = '';
+    try { sid = await $.session.id(); } catch { /* legacy host */ }
+    const ledger = ledgerFor(sid);
     let snapshot: SessionMessage[] = [];
-    try { if (relevant) snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
+    try { snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
     const position = ledger.position();
     const result = await next(event);
-    if (result.drop === undefined && relevant) {
+    if (result.drop === undefined) {
       ledger.prompt(result.text, result.context ?? [], !!event.attachments?.length, snapshot, position, result.origin ?? event.origin);
     }
     return result;
@@ -541,14 +557,43 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Precompute is speculative: no history is installed here. A success toast
     // was both misleading and a paid Jev call whose result could be discarded.
     if (event.trigger === 'precompute') return { skip: 'Jev runs when compaction is applied, not speculatively' };
+    let sid = '';
+    try { sid = await $.session.id(); } catch { /* legacy host: inline provenance */ }
+    const ledger = ledgerFor(sid);
     // First event of a session id may be this one: capture the handoff root now (launch cwd).
     try {
-      const sid = await $.session.id();
       if (sid) await handoffRoots.resolve(await resolvedCwd($), sid, '.', text => log($, text));
     } catch { /* capture only */ }
     let prepared: SessionCompaction;
+    let preparedCheckpoint = ledger.checkpoint();
     let fit: TargetFit | undefined;
-    const projection = readPinProvenance(event.messages);
+    const storeKey = sid ? pinStoreKey(sid, event.agentId) : undefined;
+    let storedPins: Pin[] = [];
+    let externalPins = false;
+    let pinReadFailed = false;
+    if (storeKey) {
+      try {
+        const record = await $.store.get(storeKey);
+        storedPins = readPinRecord(record);
+        externalPins = true;
+        // Absent means either a first migration or a lost external store. Legacy
+        // inline pins are authoritative; without them protect user rows once.
+        pinReadFailed = record === undefined && pinProvenanceTexts(event.messages).length === 0;
+      } catch {
+        // A prior cut may have moved its metadata off-transcript. Do not guess
+        // which user rows were protected while that store is unreadable.
+        pinReadFailed = true;
+        await log($, 'pin storage unavailable; user rows protected, inline provenance retained');
+      }
+    }
+    const projection = readPinProvenance(event.messages, storedPins).map(m =>
+      pinReadFailed && m.role === 'user' && m.text.trim() ? { ...m, pinned: true } : m);
+    const inputPins = collectPins(projection, new Set(projection.flatMap((m, i) => m.pinned ? [i] : [])));
+    const originalChars = event.messages.reduce((n, m) => n + messageChars(m), 0);
+    const projectedChars = projection.reduce((n, m) => n + messageChars(m), 0);
+    // Include the bookkeeping actually being removed, plus net recovered text.
+    const charsBefore = (rows: readonly Message[]): number => originalChars + Math.max(0,
+      rows.reduce((n, m) => n + messageChars(m), 0) - projectedChars);
     let input: Message[] = projection;
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
@@ -569,17 +614,21 @@ export const register: Register = (on: On, options: PluginOptions) => {
         }, config.apiKey, config.model, async ms => { await $.clock.sleep(ms); });
       const first = await compact(input, asker, config);
       const refreshed = ledger.prepare(projection, event.agentId);
-      const charsBefore = refreshed.reduce((n, m) => n + messageChars(m), 0);
+      const refreshedCheckpoint = ledger.checkpoint();
       // Turns a scored result into the actual replacement: late deliveries restored,
-      // fresh handleless rows, pin provenance row. The target loop measures this.
+      // fresh handleless rows, with inline pins only on storage failure.
       const finalize = (scored: CompactResult): SessionCompaction => {
         const restored = ledger.restore(refreshed, scored.messages);
         const pins = new Set<number>();
-        const rows = persistPinProvenance(toSessionMessages(event.messages, restored, pins), pins);
+        const policies = new Map<number, Message['notificationText']>();
+        const rebuilt = toSessionMessages(event.messages, restored, pins, policies);
+        const entries = collectPins(rebuilt, pins, policies);
+        const rows = externalPins ? rebuilt : appendPinProvenance(rebuilt, entries);
         return {
           result: { ...scored, messages: restored, stats: { ...scored.stats, messagesBefore: refreshed.length,
-            messagesAfter: restored.length, charsBefore, charsAfter: rows.reduce((n, m) => n + messageChars(m), 0) } },
+            messagesAfter: restored.length, charsBefore: charsBefore(refreshed), charsAfter: rows.reduce((n, m) => n + messageChars(m), 0) } },
           messages: rows,
+          pins: entries,
         };
       };
       let chosen = first;
@@ -589,6 +638,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         chosen = fit.result;
       }
       prepared = finalize(chosen);
+      preparedCheckpoint = refreshedCheckpoint;
     } catch (error) {
       if (await hybridSession($)) {
         // The User, 2026-10-14 18:59: with Jev unavailable the hybrid never cuts blind; it skips,
@@ -602,12 +652,36 @@ export const register: Register = (on: On, options: PluginOptions) => {
       await log($, `Jev transcript recovery (${recoveryReason(error)})`);
       // Include deliveries that arrived while a failed request was in flight.
       input = ledger.prepare(projection, event.agentId);
+      const recoveryCheckpoint = ledger.checkpoint();
       for (const note of ledger.takeNotes()) await log($, `fidelity: ${note}`);
       const result = compactTranscript(input, configured);
+      result.stats.charsBefore = charsBefore(input);
       const pins = new Set<number>();
-      prepared = { result, messages: persistPinProvenance(toSessionMessages(event.messages, result.messages, pins), pins) };
+      const policies = new Map<number, Message['notificationText']>();
+      const rebuilt = toSessionMessages(event.messages, result.messages, pins, policies);
+      const entries = collectPins(rebuilt, pins, policies);
+      prepared = { result, messages: externalPins ? rebuilt : appendPinProvenance(rebuilt, entries), pins: entries };
+      preparedCheckpoint = recoveryCheckpoint;
     }
-    const { result, messages } = prepared;
+    const { result } = prepared;
+    let messages = prepared.messages;
+    // Save before returning a handleless history. Keep old fingerprints until the
+    // session is retired so rejection of a prepared cut cannot erase old pins.
+    // A failed write/read-back retains legacy metadata in the returned history.
+    result.stats.charsAfter = messages.reduce((n, m) => n + messageChars(m), 0);
+    if (externalPins && storeKey && reductionRatio(result) >= configured.minReductionRatio) {
+      const pins = mergePins(storedPins, inputPins, prepared.pins ?? []);
+      if (pins.length) {
+        try {
+          await $.store.set(storeKey, { version: 2, pins });
+          const verified = readPinRecord(await $.store.get(storeKey));
+          if (JSON.stringify(verified) !== JSON.stringify(pins)) throw new Error('Pin write verification failed');
+        } catch {
+          messages = appendPinProvenance(messages, prepared.pins ?? []);
+          await log($, 'pin storage write failed; inline provenance retained for this cut');
+        }
+      }
+    }
     // The gate measures the actual replacement, including pin provenance.
     result.stats.charsAfter = messages.reduce((n, m) => n + messageChars(m), 0);
     if (configured.logDecisions) for (const line of decisionLogLines(result)) await log($, line);
@@ -637,6 +711,27 @@ export const register: Register = (on: On, options: PluginOptions) => {
       return { skip: `Jev ${reason}; context left as it is, built-in summary not requested` };
     }
     await notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result, post)}; visible target ${configured.maxPostCompactTokens || 'disabled'}${fitNote}; replacement prepared for ${event.trigger})`);
+    // Persistence and diagnostics await host calls. A delivery accepted during
+    // those awaits must be restored too. Finish synchronously with inline pins
+    // rather than opening another persistence/arrival race; the next cut migrates them.
+    if (ledger.checkpoint() !== preparedCheckpoint) {
+      const refreshed = ledger.prepare(projection, event.agentId);
+      const restored = ledger.restore(refreshed, result.messages);
+      const pins = new Set<number>();
+      const policies = new Map<number, Message['notificationText']>();
+      const rebuilt = toSessionMessages(event.messages, restored, pins, policies);
+      const lateMessages = appendPinProvenance(rebuilt, collectPins(rebuilt, pins, policies));
+      const lateStats = { ...result.stats, charsBefore: charsBefore(refreshed),
+        charsAfter: lateMessages.reduce((n, m) => n + messageChars(m), 0) };
+      if (reductionRatio({ stats: lateStats }) < configured.minReductionRatio) {
+        // Keep live history intact; never install a late delivery without its pins.
+        if (await hybridSession($)) return { skip: 'late deliveries left insufficient reduction; history retained' };
+        return next(event);
+      }
+      ledger.rebase(restored, event.agentId);
+      if (event.agentId === undefined) lastPostCut = estimateSessionTokens(lateMessages);
+      return { messages: lateMessages };
+    }
     ledger.rebase(result.messages, event.agentId);
     if (event.agentId === undefined) lastPostCut = post;
     return { messages };

@@ -12,7 +12,8 @@ every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
 item is kept when Jev's probability reaches `keepThreshold`; a dropped result
 is truncated to its first `truncateHeadChars` characters plus a one-line note,
-and a dropped call disappears with its result, leaving a short evidence marker.
+and a dropped call disappears with its result. One history-level warning covers
+removed supporting evidence; repeated generated notices are consolidated.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),
@@ -35,7 +36,7 @@ hooks surface before installing or loading it:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export TYPESAFE_API_KEY="<your TypeSafe key>"
 
-claude plugin marketplace add 'sinsforeal/fast-jev-compaction#fidelity/jev-041-20261014'
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#main'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -113,16 +114,22 @@ process call is unavailable the file is written in place and removal rewrites it
 as `{"order":"none"}`. Sessions without the hybrid gate never get one.
 
 The first actual cut after start/reload uses Jev's handleless rebuild. Observers
-pin accepted mid-turn text/context and rendered deliveries; all append doors
+pin accepted prompt text/context and rendered deliveries; all append doors
 supply UUID chronology. Canonical queued deliveries replace provisional prompt
 records instead of duplicating them. The bounded API-tail view recovers known
 historical hidden text and selects the compacting child by `agentId`; it never
 replaces the older projected prefix. Child attachments rendered as text are
 passed verbatim and unscored. Opaque blocks are logged, text is retained, and
 missing anchors resolve by occurrence and transcript order. New arrivals during scoring are restored before
-returning history. No persistent shared store is written. Jev replacements rebuild
-pin provenance as one separate metadata row for the next reload/resume; original
-instruction rows remain verbatim. Replacements rebuild
+returning history. Since 0.5.6, fingerprints, occurrences and notification policies
+are saved in `$.store` under `delivery-pins:v2:[sessionId,agentId]`, outside model
+context. Legacy inline rows migrate on accepted cuts. Writes are read back; a
+failure or a delivery during finalization retains inline pins for that cut.
+Missing/corrupt records protect user text conservatively. Session/child records
+are isolated, and input fingerprints survive a host-rejected replacement. The
+host's 4 MiB storage limit uses the same inline fallback; no prompt text is stored.
+Only the exact generated notification preamble is shortened; known human prompts,
+event payloads and ambiguous legacy wrappers remain verbatim. Replacements rebuild
 every row without a handle and combine parallel siblings and pure result rows.
 An empty projected result still gets the existing non-text marker.
 

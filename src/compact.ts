@@ -2,6 +2,7 @@ import { noulAnswer } from './request.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import { applyTextDecisions, collectTextBlocks, decideText, textCandidates, textQuestionsFor } from './text.js';
 import { safeSlice } from './unicode.js';
+import { normalizeRemovalNotices, REMOVAL_NOTICE } from './removal-notices.js';
 import type {
   CallAnswer,
   CallDecision,
@@ -204,6 +205,7 @@ export function applyDecisions(
     if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
   }
   const kept: Message[] = [];
+  let removalNoted = false;
   for (const message of messages) {
     const touched =
       message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
@@ -260,15 +262,17 @@ export function applyDecisions(
       continue;
     }
     const removed = message.toolUses.filter(tool => actions.get(tool.tool_use_id) === 'drop_call');
-    const marker = removed.length > 0 ? `[fast-jev-compaction removed ${removed.length} tool call(s) and their results; earlier answers may rely on that evidence]` : '';
+    const marker = removed.length > 0 && !removalNoted ? REMOVAL_NOTICE : '';
+    if (marker) removalNoted = true;
     if (message.text.trim().length === 0 && !marker && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
-    const rebuilt: Message = { ...message, text: [message.text, marker].filter(Boolean).join('\n'), toolUses, toolResults: undefined };
+    // Prefix the one new notice so an unfinished code fence cannot swallow it.
+    const rebuilt: Message = { ...message, text: [marker, message.text].filter(Boolean).join('\n'), toolUses, toolResults: undefined };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
-  return kept;
+  return normalizeRemovalNotices(kept);
 }
 
 /** Characters of text, tool input and tool output a message holds. */

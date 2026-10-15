@@ -130,7 +130,7 @@ describe('compactSession', () => {
     expect(JSON.parse(bodies[0]!).model).toBe('jev-x');
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_call', 'keep']);
     expect(messages.every(m => m.handle === undefined)).toBe(true);
-    expect(messages.some(m => m.text.includes('removed 1 tool call'))).toBe(true);
+    expect(messages.filter(m => m.text.includes('removed tool calls and results'))).toHaveLength(1);
     expect(summarize(output)).toMatch(/^\d+% reduction; 1 kept, 1 call_dropped; estimated visible post-cut ~\d+ tokens; state ~\d+ tokens \(full\) in 1 request\(s\)$/);
     expect(decisionLog(output)).toBe('t1:Read:drop_call/call=0.10/result=0.10 t2:Bash:keep/call=0.90/result=0.90');
     expect(decisionLogLines(output)).toEqual([`decisions: ${decisionLog(output)}`]);

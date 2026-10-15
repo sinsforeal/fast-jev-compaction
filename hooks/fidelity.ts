@@ -1,6 +1,7 @@
 import type { SessionMessage } from 'claude-code';
 import type { Message } from '../src/types.js';
 import type { DeliveryAppend } from './runtime-contract.js';
+import { normalizeNotificationText, normalizeLegacyNotificationText } from './notification-text.js';
 
 // These are safe fixed reasons. Never include arbitrary message/error content.
 export class FidelityError extends Error {}
@@ -10,7 +11,11 @@ type RecordRow = {
   occurrence: number;
   promptGroup?: number; origin?: string;
   queued?: boolean; beforeUuid?: string;
+  notificationText?: Message['notificationText'];
 };
+const canonical = (text: string, kind?: Message['notificationText']): string => kind === 'verbatim' ? text
+  : kind === 'generated' ? normalizeNotificationText(text) : normalizeLegacyNotificationText(text);
+const canonicalText = (m: SessionMessage | Message): string => m.role === 'user' ? canonical(m.text, (m as Message).notificationText) : m.text;
 const key = (m: SessionMessage | Message): string => JSON.stringify({ role: m.role, text: m.text,
   uses: m.toolUses.map(t => [t.tool_use_id, t.tool, t.input]),
   results: m.toolResults?.map(t => [t.tool_use_id, t.text, t.isError]) });
@@ -45,7 +50,8 @@ export class FidelityLedger {
     // for the log, and never spend the whole cut on a built-in summary for it.
     const opaque = content ? content.filter(b => b.kind !== 'text' || typeof b.text !== 'string')
       .map(b => { const t = (b as { type?: unknown }).type; return typeof t === 'string' ? t : String(b.kind ?? 'unknown'); }) : [];
-    const text = problem ? undefined : content!.map(b => (b.kind === 'text' && typeof b.text === 'string') ? b.text : '').join('');
+    const notificationText = (event.origin as { kind?: string } | undefined)?.kind === 'engine' ? 'generated' : 'verbatim';
+    const text = problem ? undefined : canonical(content!.map(b => (b.kind === 'text' && typeof b.text === 'string') ? b.text : '').join(''), notificationText);
     if (opaque.length) {
       this.notes.push(`delivery ${event.uuid}${event.agentId ? ` (agent ${event.agentId})` : ''}: ${opaque.length} opaque block(s) not carried handleless (${[...new Set(opaque)].join(', ')}); text blocks kept verbatim`);
       if (text === '') return; // nothing reconstructable here; the host projection holds the same
@@ -67,8 +73,8 @@ export class FidelityLedger {
     this.rows.push({ serial: ++this.serial, scope: event.agentId, uuid: event.uuid,
       sequence, anchor: snapshot.map(key), problem,
       queued: event.message.name === 'queued_command', origin: JSON.stringify(event.origin ?? { kind: 'human' }),
-      occurrence: snapshot.filter(m => m.role === 'user' && m.text === content?.map(b => b.text ?? '').join('')).length,
-      text });
+      occurrence: snapshot.filter(m => m.role === 'user' && canonical(m.text, notificationText) === text).length,
+      text, notificationText });
   }
 
   prompt(text: string, context: readonly string[], attachments: boolean,
@@ -84,11 +90,13 @@ export class FidelityLedger {
       sequence: this.sequence + 0.5, anchor: snapshot.map(key), prompt: true, text: value,
       promptGroup: group, origin: JSON.stringify(origin ?? { kind: 'human' }),
       occurrence: snapshot.filter(m => m.role === 'user' && m.text.includes(value)).length,
+      notificationText: 'verbatim',
       problem: attachments ? 'prompt attachments expose metadata only; no reconstructable delivery observed' : undefined });
   }
 
   prepare(messages: readonly SessionMessage[], scope?: string): Message[] {
-    const result: Message[] = messages.map((m, i) => ({ ...m, fidelityOrder: 2 * i }));
+    const result: Message[] = messages.map((m, i) => ({ ...m,
+      text: (m as Message).pinned ? canonicalText(m) : m.text, fidelityOrder: 2 * i }));
     const handles = new Map(messages.map((m, i) => [m.handle, i]));
     const claimed = new Set<number>();
     const inserts = new Map<number, Message[]>();
@@ -103,7 +111,7 @@ export class FidelityLedger {
         // once, preserving repeated equal instructions rather than deduplicating them.
         let occurrence = 0;
         at = messages.findIndex((m, i) => {
-          if (m.role !== 'user' || !(row.prompt ? m.text.includes(row.text!) : m.text === row.text)) return false;
+          if (m.role !== 'user' || !(row.prompt ? m.text.includes(row.text!) : canonical(m.text, row.notificationText) === row.text)) return false;
           const sharedGroup = row.promptGroup !== undefined && result[i]?.fidelityPins?.some(id =>
             this.rows.some(r => r.serial === id && r.promptGroup === row.promptGroup));
           return occurrence++ >= row.occurrence && (!claimed.has(i) || sharedGroup);
@@ -114,7 +122,8 @@ export class FidelityLedger {
         claimed.add(at);
         // A projected row may omit context that the observer rendered. Restore
         // the canonical whole text; do not pin the host's incomplete projection.
-        result[at] = { ...result[at]!, text: row.prompt ? result[at]!.text : row.text!, pinned: true,
+        result[at] = { ...result[at]!, text: row.prompt ? messages[at]!.text : row.text!, pinned: true,
+          notificationText: row.notificationText,
           fidelityPins: [...(result[at]!.fidelityPins ?? []), row.serial] };
         continue;
       }
@@ -148,7 +157,7 @@ export class FidelityLedger {
         }
       }
       const list = inserts.get(position) ?? [];
-      list.push({ role: 'user', text: row.text!, toolUses: [], pinned: true,
+      list.push({ role: 'user', text: row.text!, toolUses: [], pinned: true, notificationText: row.notificationText,
         fidelityPins: [row.serial],
         fidelityOrder: 2 * position - 1 + (1 - 1 / (row.serial + 1)) });
       inserts.set(position, list);
@@ -182,6 +191,7 @@ export class FidelityLedger {
 
   recover(text: string, position: number, messages: readonly SessionMessage[], scope: string | undefined,
     claimed: Set<number>): void {
+    text = normalizeLegacyNotificationText(text);
     const anchor = messages.slice(0, position).map(key);
     const existing = this.rows.find(r => r.scope === scope && r.text === text && !claimed.has(r.serial) &&
       r.anchor.at(-1) === anchor.at(-1));
@@ -190,7 +200,7 @@ export class FidelityLedger {
     claimed.add(serial);
     this.rows.push({ serial, scope, text, anchor, beforeUuid: messages[position]?.handle,
       sequence: this.sequence + 0.5,
-      occurrence: messages.slice(0, position).filter(m => m.role === 'user' && m.text === text).length });
+      occurrence: messages.slice(0, position).filter(m => m.role === 'user' && normalizeLegacyNotificationText(m.text) === text).length });
   }
 
   coreApplied(scope: string | undefined, checkpoint: number): void {

@@ -30,6 +30,8 @@ export interface Message {
   toolResults?: ToolResult[];
   /** Observer-confirmed instructions/deliveries are never scored or edited. */
   pinned?: boolean;
+  /** Provenance for fixed notification boilerplate; never returned to the model. */
+  notificationText?: 'verbatim' | 'generated';
   /** Hook-local chronological position, discarded by host reconstruction. */
   fidelityOrder?: number;
   /** Hook-local observer identities, never returned in the host projection. */

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6 - 2026-10-15
+
+- Collapse exact standalone tool-removal notices into one history-level warning; keep detailed counts in compaction decisions/logs. Repeated passes are idempotent. User text, quoted/fenced examples and tool payloads are untouched.
+- Move delivery pin fingerprints and occurrences from model-visible user messages to the host's durable plugin store, keyed by session id and child id. Migrate legacy inline rows on the next accepted cut. Verify writes, preserve input fingerprints if the host rejects a prepared cut, and retain inline pins when storage fails or deliveries arrive during final persistence/diagnostics. Missing or corrupt records conservatively protect user text; tool-only result rows remain eligible.
+- Shorten only the exact generated background-notification preamble. Known human prompts stay verbatim, including raw pasted warning examples, across restart. Legacy pins without origin shorten only warning-only fragments after recognized prefixes. Event bodies and ordering remain intact; ambiguous prefixes stay unchanged.
+- Measure reduction against the original incoming history, including removed bookkeeping. Session id changes isolate the in-memory delivery ledger as well as durable pins.
+- Validation: 194 tests, library/hook typechecks, build, plugin loader validation. Offline keep-all replay of Pick Assist's current parent chain saved an estimated 18,392 visible tokens without changing user payload/order or tools/results beyond the existing host projection. A live accepted compaction is still the runtime acceptance check.
+
 ## 0.5.5 - 2026-10-14
 - Pending-order marker. A SOON or NOW handoff order writes `<handoffDir>/<sid>/order.json` (`order`, `ts`, `tokens`, `limit`, `attempt`) atomically, rewrites it on each repeated order, and removes it when the cycle ends (after the clear, in the old and new id folders, before the resume submit; also on give-up, blocked clear, third clear failure). Lets the trees' Stop hooks stand down before `latest.md` exists (seen live 20:30: HANDOFF NOW at 300,664 waited behind a Stop-hook refusal). The order log line names the marker path. Rename and delete go through `$.process.run`; without it the marker is written in place and removal leaves `{"order":"none"}`.
 

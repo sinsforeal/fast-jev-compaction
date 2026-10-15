@@ -12,8 +12,10 @@ lossy: a file path, exact error, constraint, or command can disappear even when
 it matters later. This library retains the projected history while removing stale
 tool evidence and recognized injected blocks. Old long assistant replies can be
 abridged to their opening and closing. Untagged user text and fenced examples stay
-verbatim. Mid-turn instructions and rendered queued deliveries are pinned verbatim,
-including after resume and in child loops. Depth is measured; reduction gates the cut.
+verbatim. Accepted instructions and rendered queued deliveries are pinned,
+including after resume and in child loops. Only an exact generated background-event
+preamble may be shortened; instructions and event payloads stay verbatim.
+Depth is measured; reduction gates the cut.
 
 The repository is both an npm package (`src/`) and a Claude Code plugin
 (`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
@@ -51,7 +53,8 @@ built-in compaction summary with the original messages.
      first `truncateHeadChars` characters plus a one-line note;
    - else → remove the call together with its result.
 7. The message list is rebuilt: a message that loses all its content is
-   removed except for short supporting-evidence markers. The library returns
+   removed except for one history-level supporting-evidence warning. Old repeated
+   generated warnings are consolidated, while quoted/fenced examples remain. The library returns
    untouched messages as the same objects and drops a call together with its result.
 8. Recognized injected text and long replies are scored too, using bounded previews
    in the state. Pinned text is kept. Blocks whose evidence vanishes during state
@@ -186,12 +189,25 @@ hidden rendered deliveries and subagent compactions. Accepted prompt text and
 context, and queued attachments rendered as text, stay verbatim and unscored at
 their observed chronological positions. Deliveries arriving during scoring are
 inserted before returning the replacement. Rows get fresh host IDs and parents.
-One separate provenance row records fingerprints and occurrence numbers of pinned
-rows, so reload/resume preserves their pin status without changing instruction
-text or writing a shared store. It is replaced, rather than multiplied, per cut.
+Pin fingerprints, occurrence numbers and notification-text policies live in the
+host's persistent plugin store under a session-and-child-specific key. They are
+not model-visible text. Legacy inline provenance is migrated at an accepted cut.
+Writes are verified before returning the replacement; a failed write uses inline
+provenance for that cut. A missing or unreadable record conservatively protects
+user text. Prior fingerprints are retained so a rejected replacement cannot lose
+the old history's pins. The host's 4 MiB store limit uses the same inline fallback.
+The store contains fingerprints and policies, never prompt or event text.
+
+Exact generated background-event warnings become a concise non-approval label.
+Human submissions are protected verbatim, even when they paste that warning.
+Legacy rows have no origin, so only warning-only fragments with recognized
+prefixes are shortened; ambiguous prefixes and event payloads stay untouched.
+Arrivals during final persistence/diagnostics are restored synchronously with
+inline provenance, which the next accepted cut can migrate.
 `maxPostCompactTokens` (default 0) only warns. `minReductionRatio` (default 0.25)
-is the skip gate: actual replacement characters, including pin
-provenance, must meet that reduction or the cut is skipped. Equal-to-threshold cuts are retained.
+is the skip gate: actual replacement characters, including fallback inline pins,
+are compared with the original incoming history plus net recovered text. Savings
+from removed bookkeeping count. Equal-to-threshold cuts are retained.
 
 Repeated prompts map by occurrence within observable anchors, then transcript
 order when anchors are absent. API order conflicts retain the projected order
@@ -231,7 +247,7 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add 'sinsforeal/fast-jev-compaction#hybrid/handoff-20261014'
+claude plugin marketplace add 'sinsforeal/fast-jev-compaction#main'
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -245,13 +261,10 @@ the configured reduction ratio. The built-in summary is never requested. Run wit
 `DISABLE_AUTO_COMPACT=1` so the harness's own compaction stays out of the loop.
 The same variable is the plugin's session gate: without it the hook behaves as 0.4.4 did (percent trigger, a ratio miss falls through to the harness summary, no handoff orders), so installing 0.5.0 changes nothing in sessions that did not opt in.
 
-The branch-qualified source above selects the 0.5.0 candidate
-(`hybrid/handoff-20261014`) without promoting the fork's default branch. Ryan v2
-owns installation under queue hybrid-handoff-study-20261014. For an existing
-declared source, preserve unrelated fields and set its GitHub `repo` to
-`sinsforeal/fast-jev-compaction` and `ref` to `hybrid/handoff-20261014` before the
-add/update commands. Confirm both marketplace and cached plugin manifests say
-0.5.0 before reloading.
+The branch-qualified source above selects the maintained `main` release.
+For an existing declared source, preserve unrelated fields and set its GitHub
+`repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
+Confirm both marketplace and cached plugin manifests say 0.5.6 before reloading.
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is

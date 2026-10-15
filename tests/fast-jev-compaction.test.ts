@@ -283,7 +283,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Never edit anything under src/generated. Fix the failing test.',
-      '[fast-jev-compaction removed 1 tool call(s) and their results; earlier answers may rely on that evidence]',
+      '[fast-jev-compaction removed tool calls and results; earlier answers may rely on missing evidence]',
       'a.ts looks fine; checking b.ts',
       'tool-2',
       'tool-2',
