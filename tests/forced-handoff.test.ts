@@ -338,6 +338,19 @@ describe('module-loaded callback receipt', () => {
     expect(h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!.match(/module-loaded/g)).toHaveLength(2);
   });
 
+  it('keeps receipt and forced-notice dedupe local to each registration and session', async () => {
+    const h = harness('unset');
+    await force(h); await force(h);
+    expect(h.logs.filter(line => line.includes('built-in summary not requested'))).toHaveLength(1);
+    h.install(); await force(h);
+    expect(h.logs.filter(line => line.includes('built-in summary not requested'))).toHaveLength(2);
+    expect(h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!.match(/module-loaded/g)).toHaveLength(2);
+    h.setSid('second-dedupe-session'); await force(h); await force(h);
+    expect(h.logs.filter(line => line.includes('built-in summary not requested'))).toHaveLength(3);
+    expect(h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!.match(/module-loaded/g)).toHaveLength(3);
+    expect(h.core).not.toHaveBeenCalled();
+  });
+
   it('a failed receipt write cannot reopen summary or block a forced handoff', async () => {
     const h = harness('unset');
     const write = h.$.fs.write.getMockImplementation()!;
