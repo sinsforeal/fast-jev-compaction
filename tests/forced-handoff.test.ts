@@ -284,6 +284,31 @@ describe('registered forced handoff floor', () => {
     expect(h.core).not.toHaveBeenCalled();
   });
 
+  it.each(['read', 'stat'] as const)('a changed session during the final file %s is never cleared', async when => {
+    const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+    let reads = 0;
+    let stats = 0;
+    const read = h.$.fs.read.getMockImplementation()!;
+    const stat = h.$.fs.stat.getMockImplementation()!;
+    h.$.fs.read.mockImplementation(async (path: string) => {
+      const text = await read(path);
+      if (path === h.latest && ++reads === 3 && when === 'read') h.setSid('replacement-session');
+      return text;
+    });
+    h.$.fs.stat.mockImplementation(async (path: string) => {
+      const info = await stat(path);
+      if (path === h.latest && ++stats === 6 && when === 'stat') h.setSid('replacement-session');
+      return info;
+    });
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).not.toHaveBeenCalled();
+    expect(reads).toBe(3);
+    expect(stats).toBe(6);
+    expect(h.files.has(`${h.root}/resumed.json`)).toBe(true);
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(1);
+    expect(h.core).not.toHaveBeenCalled();
+  });
+
   it('clear failures stop at the bounded limit without submitting resume', async () => {
     const h = harness('unset'); await force(h); h.put(h.latest, h.good);
     h.$.command.run.mockRejectedValue(new Error('clear refused'));

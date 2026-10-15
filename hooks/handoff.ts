@@ -304,6 +304,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
             await log(`handoff changed immediately before clear (${final.ok ? 'file replaced' : final.reason}); context retained`);
             return;
           }
+          if (await host.session.id() !== sessionId) return;
           try {
             await host.command.run({ command: 'clear' });
           } catch {

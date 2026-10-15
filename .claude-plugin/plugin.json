@@ -26,13 +26,13 @@
     "compactAtPercent": {
       "type": "number",
       "title": "Compaction percentage",
-      "description": "Legacy trigger: context percentage at which turn.complete requests compaction. Used only when compactAtTokens is 0.",
+      "description": "Context percentage that triggers compaction when DISABLE_AUTO_COMPACT is not 1, compactAtTokens is 0, or context.tokens is unavailable.",
       "default": 60
     },
     "minReductionRatio": {
       "type": "number",
       "title": "Minimum reduction ratio",
-      "description": "Prune is skipped, context left as it is, below this visible character reduction ratio. The built-in summary is never requested.",
+      "description": "Strictly below this actual character reduction, retain history and pins and immediately force written HANDOFF NOW, regardless of launcher flag or token count. Equality passes. Never requests a built-in summary.",
       "default": 0.25
     },
     "maxStateTokens": {
@@ -73,44 +73,44 @@
     },
     "maxPostCompactTokens": {
       "type": "number",
-      "title": "Visible post-cut token target",
+      "title": "Visible post-cut token warning",
       "description": "Report visible conversation size against this warning threshold; never triggers summary; excludes system/tool prefix; 0 disables the warning.",
       "default": 0
     },
     "compactAtTokens": {
       "type": "number",
       "title": "Compaction token trigger",
-      "description": "turn.complete requests a prune when the context holds at least this many tokens. Above 0 it replaces the percentage trigger; 0 uses the percentage.",
+      "description": "With DISABLE_AUTO_COMPACT=1 and readable context.tokens, turn.complete requests a prune at this count. Above 0 replaces the percentage trigger; otherwise use compactAtPercent.",
       "default": 160000
     },
     "targetVisibleTokens": {
       "type": "number",
       "title": "Post-cut visible token target",
-      "description": "The cut is tightened over cached Jev answers until the visible messages are at or under this estimate. Counts visible messages only, not the system and tool prefix; 0 disables the target.",
+      "description": "With DISABLE_AUTO_COMPACT=1 only, tighten the cut over cached Jev answers toward this visible-message estimate. Excludes system/tool prefix; 0 disables. The reduction floor still applies.",
       "default": 64000
     },
     "handoffAt": {
       "type": "number",
       "title": "Handoff order size",
-      "description": "Visible tokens at which the plugin orders HANDOFF SOON, again per 50000 tokens of growth. Needs handoffDir.",
+      "description": "With DISABLE_AUTO_COMPACT=1, visible tokens at which HANDOFF SOON is ordered, again per 50000 tokens of growth. Ratio-forced NOW does not wait for this threshold.",
       "default": 250000
     },
     "handoffForceAt": {
       "type": "number",
       "title": "Forced handoff size",
-      "description": "Visible tokens at which the plugin orders HANDOFF NOW; raised to handoffAt if lower. Needs handoffDir.",
+      "description": "With DISABLE_AUTO_COMPACT=1, visible tokens at which HANDOFF NOW is ordered; raised to handoffAt if lower. A reduction-ratio miss forces NOW regardless of flag or token count.",
       "default": 300000
     },
     "handoffDir": {
       "type": "string",
       "title": "Handoff directory",
-      "description": "Each session keeps latest.md, resumed.json and prune_skipped.json in a folder named by its session id. A relative path resolves against the session working directory (one store per tree); an absolute path is shared by every session.",
+      "description": "Session-id folders hold latest.md, resumed.json, prune_skipped.json and order.json. Relative paths use the cwd captured on the session's first compaction or turn-complete callback; later cwd changes do not move them. Absolute paths share a root.",
       "default": "var/handoffs"
     },
     "handoffSkillPath": {
       "type": "string",
       "title": "Handoff skill path",
-      "description": "Path cited in the handoff orders; a relative path resolves against the session working directory.",
+      "description": "Path cited in handoff orders; relative paths use the same captured session cwd as handoffDir.",
       "default": "docs/HANDOFF_SKILL.md"
     },
     "logDecisions": {
