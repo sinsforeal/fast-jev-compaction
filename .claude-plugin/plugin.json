@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
@@ -112,6 +112,18 @@
       "title": "Handoff skill path",
       "description": "Path cited in handoff orders; relative paths use the same captured session cwd as handoffDir.",
       "default": "docs/HANDOFF_SKILL.md"
+    },
+    "idleWarmMinutes": {
+      "type": "number",
+      "title": "Idle cache warm interval (minutes)",
+      "description": "0 = off. Otherwise, this many minutes after each turn ends, send one minimal model fork over the session's own transcript so the prompt cache is read and its TTL reset. Use a value under the cache lifetime (for example 50 for the 1 hour cache). Never submits a prompt.",
+      "default": 0
+    },
+    "idleWarmMax": {
+      "type": "number",
+      "title": "Idle warms per gap",
+      "description": "At most this many warms per idle gap, so an abandoned session stops spending. A new prompt starts a new gap.",
+      "default": 6
     },
     "logDecisions": {
       "type": "boolean",

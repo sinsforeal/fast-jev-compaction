@@ -142,6 +142,8 @@ put it in a source file.
 | `handoffDir` | `var/handoffs` | Session files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`, `order.json`); `<handoffDir>/current_session.json` follows the id. Relative paths use the cwd captured on the session's first compaction or turn-complete callback, cached per session id; later cwd changes do not move the files. Absolute paths share one root |
 | `window.json` | none | Not an option: a per-tree override file, see "Per-tree handoff window" below |
 | `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | Path cited in the orders; relative paths use the same captured cwd as `handoffDir` |
+| `idleWarmMinutes` | `0` | 0 = off. Otherwise warm the prompt cache this many minutes after each turn ends, see "Idle cache warm" below |
+| `idleWarmMax` | `6` | Warms per idle gap before the session counts as abandoned |
 
 The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, retains history and pins, writes `prune_skipped.json` and requests HANDOFF NOW immediately. This applies when `DISABLE_AUTO_COMPACT` is `1`, missing, another value or unreadable, even below the token thresholds or without usage counts. The persisted force reason continues the cycle after callback reload or loss of the flag. Every log line starts with `[first 8 chars of the session id]`.
 
@@ -169,6 +171,16 @@ different window per tree, put `window.json` in the resolved `handoffDir` (defau
 - Missing file: the options win, nothing is logged. Malformed JSON, a non-number, or `handoffAt` under 50000: the file is ignored, the options stay, one warning per mtime in `~/.claude/fast-jev-compaction.log`.
 - `arm` and `until` are labels only. A change (file appears, changes, disappears) logs one line, e.g. `handoff window 200000/250000 from window.json (arm B)` or `handoff window back to options 250000/300000`.
 - Each SOON/NOW log line carries `window <at>/<force> from <source>`, and `order.json` has a `window` field, so a trial readout shows which arm a handoff ran under.
+
+#### Idle cache warm
+
+Off by default. The main conversation's prompt cache lives one hour on a subscription; a longer gap makes the next turn rewrite the whole context at the write price. With `idleWarmMinutes` > 0 (pick under the lifetime, e.g. 50):
+
+- After each main-thread `turn.complete` one `$.clock.after` timer is armed per session. A new `prompt.submit` or `turn.complete` cancels and re-arms it.
+- When it fires and no turn is running, one `$.model.fork({ prompt: "Reply with the single word ok." })` is sent. The fork runs over the session's own transcript and shares the main prefix (docs: "a fork ... inherits the parent's system prompt, tools, and conversation history exactly, so its first request reads the parent's cache"), and a cache hit resets the TTL. Then it re-arms, at most `idleWarmMax` times per gap.
+- It never submits a prompt, never warms during a turn, and a failing or null fork is logged once and stops warming for that gap.
+- Log line per warm in `~/.claude/fast-jev-compaction.log`: `[sid8] idle warm <n> after <m> min: cache_read <r>, cache_write <w>, out <o>`. A first warm with `cache_read` near the context size and a small `cache_write` is the proof that the main prefix was read.
+- Limits: `$.model.fork` takes no max-token or model setting, so the output cap is the prompt. Forks sit in the "everything else" TTL bucket (5 minutes), so the fork's own few new tokens are written at 5 minutes; the read prefix keeps its one hour entry.
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -255,7 +267,7 @@ probabilities. Error bodies and credentials are omitted. Recovery reasons and
 chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
 
 The first callback for each session per registration writes a disk-only receipt:
-`module-loaded hook=fast-jev-compaction@0.5.10/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+`module-loaded hook=fast-jev-compaction@0.5.11/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
 The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
 value or error body. A cache or manifest version alone is not a loaded receipt.
 Callback re-registration can emit another receipt for the same session.
@@ -298,7 +310,7 @@ own automatic compaction; the plugin cannot disable an independent harness path.
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.10 before reloading,
+Confirm both marketplace and cached plugin manifests say 0.5.11 before reloading,
 then require a fresh callback `module-loaded` receipt for the intended full session id.
 Native function-hook scanning and a live handoff remain separate install checks;
 unit tests and a version string do not prove either.

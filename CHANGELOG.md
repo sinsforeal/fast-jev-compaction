@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.11 - 2026-10-16
+
+- Add an opt-in idle cache warm (`idleWarmMinutes`, default 0 = off; `idleWarmMax`, default 6). After each main-thread turn.complete one `$.clock.after` timer per session is armed. When it fires and no turn runs, one `$.model.fork` with the prompt `Reply with the single word ok.` is sent, which reads the main conversation's cached prefix and resets its TTL; then it re-arms, up to `idleWarmMax` warms per gap. A new prompt.submit or turn.complete cancels and re-arms. Never submits a prompt, never warms during a turn, never throws out of the timer.
+- Each warm logs one line to `~/.claude/fast-jev-compaction.log`: `[sid8] idle warm 2 after 100 min: cache_read 212345, cache_write 41, out 3` (usage from the fork result). A null or failing fork logs one `idle warm <n> failed ...` line and stops warming for that gap.
+- Code in `hooks/idle-warm.ts`; wired into the prompt.submit and turn.complete handlers. Tests: `tests/idle-warm.test.ts`. Whether the fork's prefix really equals the main one (a live cache_read near the context size on the first warm) is a deployment check. See `docs/reports/JEV_WARM_NOTEBOOK_20261016.md`.
+
 ## 0.5.10 - 2026-10-16
 
 - Add a per-tree handoff window override: `<handoffDir>/window.json` `{"handoffAt", "handoffForceAt", "arm", "until"}`. User-level `pluginConfigs` give one value to every tree; this file lets each tree run its own window. Read live at each turn completion and ratio miss, cached by mtime (one stat when unchanged). Missing file: options win, silent. Malformed JSON, non-numbers or `handoffAt` under 50000: ignored, one warning per mtime. `handoffForceAt` is still raised to `handoffAt` if lower.
