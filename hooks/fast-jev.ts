@@ -52,7 +52,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.9/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.10/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -517,6 +517,107 @@ async function resolvedCwd($: CwdHost): Promise<string | undefined> {
   try { return await $.session.cwd(); } catch { return undefined; }
 }
 
+/**
+ * 0.5.10: per-tree handoff window. `<resolved handoffDir>/window.json` =
+ * { "handoffAt": 200000, "handoffForceAt": 250000, "arm": "B", "until": "..." } overrides the options
+ * for that tree and is re-read on every use, cached by mtime (an unchanged file costs one stat).
+ * Missing: options win, silent. Bad JSON, non-numbers or handoffAt under 50000: options win, one warning per mtime.
+ */
+const WINDOW_FILE = 'window.json';
+const WINDOW_MIN_AT = 50_000;
+type WindowFile = { handoffAt?: number; handoffForceAt?: number; arm?: string; until?: string };
+type WindowState = {
+  /** path -> parse result of the file at that mtime (value undefined = rejected). */
+  cache: Map<string, { mtimeMs: number; value?: WindowFile }>;
+  /** path -> mtime of the last warning, so a rejected file warns once. */
+  warned: Map<string, number>;
+  /** path -> last effective `source at/force`, to log a change once. Absent = options. */
+  last: Map<string, string>;
+};
+type WindowHost = LogHost & CwdHost & {
+  fs: { stat: (path: string) => Promise<{ kind: string; size: number; mtimeMs: number }> };
+};
+type EffectiveWindow = { handoffAt: number; handoffForceAt: number; windowSource: string };
+
+function createWindowState(): WindowState {
+  return { cache: new Map(), warned: new Map(), last: new Map() };
+}
+
+/** A usable file, or the reason it is rejected. */
+function parseWindowFile(text: string): WindowFile | string {
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch { return 'not valid JSON'; }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'not a JSON object';
+  const rec = raw as Record<string, unknown>;
+  const out: WindowFile = {};
+  for (const key of ['handoffAt', 'handoffForceAt'] as const) {
+    if (rec[key] === undefined) continue;
+    const v = rec[key];
+    if (typeof v !== 'number' || !Number.isFinite(v)) return `${key} is not a number`;
+    out[key] = Math.floor(v);
+  }
+  if (out.handoffAt === undefined && out.handoffForceAt === undefined) return 'no handoffAt or handoffForceAt';
+  if (out.handoffAt !== undefined && out.handoffAt < WINDOW_MIN_AT) return `handoffAt ${out.handoffAt} is below ${WINDOW_MIN_AT}`;
+  if (out.handoffForceAt !== undefined && out.handoffForceAt <= 0) return `handoffForceAt ${out.handoffForceAt} is not positive`;
+  if (typeof rec.arm === 'string' && rec.arm) out.arm = rec.arm;
+  if (typeof rec.until === 'string' && rec.until) out.until = rec.until;
+  return out;
+}
+
+/** Never throws; any host failure leaves the options in force. */
+async function effectiveWindow($: WindowHost, configured: HookConfig, dir: string, state: WindowState): Promise<EffectiveWindow> {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
+  const path = `${dir.replace(/[\\/]+$/, '')}${sep}${WINDOW_FILE}`;
+  const options: EffectiveWindow = { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+  let result = options;
+  try {
+    let mtimeMs: number | undefined;
+    try {
+      const stat = await $.fs.stat(path);
+      if (stat.kind === 'file') mtimeMs = stat.mtimeMs;
+    } catch { mtimeMs = undefined; }
+    if (mtimeMs === undefined) state.cache.delete(path);
+    else {
+      let entry = state.cache.get(path);
+      if (!entry || entry.mtimeMs !== mtimeMs) {
+        let parsed: WindowFile | string;
+        try { parsed = parseWindowFile(await $.fs.read(path)); } catch { parsed = 'unreadable'; }
+        entry = { mtimeMs, ...(typeof parsed === 'string' ? {} : { value: parsed }) };
+        state.cache.set(path, entry);
+        if (typeof parsed === 'string' && state.warned.get(path) !== mtimeMs) {
+          state.warned.set(path, mtimeMs);
+          await appendLog($, await tag($, `warn: ${path} ignored (${parsed}); the options stay in force`));
+        }
+      }
+      if (entry.value) {
+        const at = entry.value.handoffAt ?? configured.handoffAt;
+        const force = Math.max(entry.value.handoffForceAt ?? configured.handoffForceAt, at);
+        result = { handoffAt: at, handoffForceAt: force, windowSource: entry.value.arm ? `window.json (arm ${entry.value.arm})` : 'window.json' };
+      }
+    }
+    const key = `${result.windowSource} ${result.handoffAt}/${result.handoffForceAt}`;
+    const before = state.last.get(path) ?? `options ${options.handoffAt}/${options.handoffForceAt}`;
+    if (key !== before) {
+      state.last.set(path, key);
+      await appendLog($, await tag($, result.windowSource === 'options'
+        ? `handoff window back to options ${result.handoffAt}/${result.handoffForceAt}`
+        : `handoff window ${result.handoffAt}/${result.handoffForceAt} from ${result.windowSource}${state.cache.get(path)?.value?.until ? ` until ${state.cache.get(path)!.value!.until}` : ''}`));
+    }
+  } catch { result = options; }
+  return result;
+}
+
+/** Resolves the session's handoff dir and returns the config pieces every handoff decision uses. */
+async function windowFor($: WindowHost, configured: HookConfig, roots: HandoffRoots, sid: string, cwd: string | undefined, state: WindowState): Promise<EffectiveWindow> {
+  if (!configured.handoffDir || !sid) return { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+  try {
+    const dir = await roots.resolve(cwd, sid, configured.handoffDir, text => log($, text));
+    return await effectiveWindow($, configured, dir, state);
+  } catch {
+    return { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+  }
+}
+
 /** A callback receipt, not a manifest/cache assertion. Disk only, once per session. */
 async function loadedReceipt($: LogHost, loadedSessions: Set<string>): Promise<void> {
   let sid: string;
@@ -533,6 +634,7 @@ type RatioMissState = {
   forcedThisTurn: Set<string>;
   notBefore: Map<string, number>;
   forceNotices: Set<string>;
+  windows: WindowState;
 };
 
 // Host-taking helpers must stay module-local for the native hooks loader.
@@ -541,7 +643,7 @@ async function ratioMiss(
   $: SkipHost & HandoffHost, configured: HookConfig, state: RatioMissState,
   sid: string, reason: string, estimate: number, fitNote = '',
 ) {
-  const { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices } = state;
+  const { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices, windows } = state;
   let visible: number | undefined;
   try {
     const tokens = (await $.session.usage()).context.tokens;
@@ -555,9 +657,10 @@ async function ratioMiss(
     if (visible !== undefined) notBefore.set(sid, visible + PRUNE_HYSTERESIS_TOKENS);
     try {
       const cwd = await resolvedCwd($);
+      const win = await windowFor($ as unknown as WindowHost, configured, handoffRoots, sid, cwd, windows);
       await handoffStep($, {
         sessionId: sid, visible, forceReason: reason, requestOnly: true,
-        config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
+        config: { ...win,
           handoffDir: await handoffRoots.resolve(cwd, sid, configured.handoffDir, text => log($, text)),
           handoffSkillPath: await handoffRoots.resolve(cwd, sid, configured.handoffSkillPath, text => log($, text)) },
         log: text => log($, text),
@@ -626,7 +729,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const notBefore = new Map<string, number>();
   const forcedThisTurn = new Set<string>();
   const forceNotices = new Set<string>();
-  const ratioMissState: RatioMissState = { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices };
+  const windows = createWindowState();
+  const ratioMissState: RatioMissState = { fallbackCounts, handoffRoots, forcedThisTurn, notBefore, forceNotices, windows };
   try { on('session.compact', async ($, event) => {
     await loadedReceipt($, loadedSessions);
     // Precompute is speculative: no history is installed here. A success toast
@@ -719,7 +823,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
         // The User, 2026-10-14 18:59: with Jev unavailable the hybrid never cuts blind; it skips,
         // marks the reason, and the handoff machine (system B) takes over at handoffAt/handoffForceAt.
         const reason = `Jev unavailable (${recoveryReason(error)})`;
-        await notify($, `prune skipped (${reason}); no blind cut, the handoff takes over at ${configured.handoffAt}/${configured.handoffForceAt} tokens`);
+        const win = await windowFor($ as unknown as WindowHost, configured, handoffRoots, sid, await resolvedCwd($), windows);
+        await notify($, `prune skipped (${reason}); no blind cut, the handoff takes over at ${win.handoffAt}/${win.handoffForceAt} tokens (${win.windowSource})`);
         await countFallback($, fallbackCounts, 'jev_unavailable', configured.logDecisions);
         await writeSkipMarker($, handoffRoots, configured, reason, estimateSessionTokens(projection));
         return { skip: `${reason}; context left as it is, handoff takes over` };
@@ -854,9 +959,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (configured.handoffDir && sid && event.isAborted !== true) {
       try {
         const cwdNow = await resolvedCwd($);
+        const win = await windowFor($ as unknown as WindowHost, configured, handoffRoots, sid, cwdNow, windows);
         await handoffStep($ as unknown as HandoffHost, {
           sessionId: sid, visible, thresholdsEnabled: hybrid, repeatForced: !justForced,
-          config: { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt,
+          config: { ...win,
             handoffDir: await handoffRoots.resolve(cwdNow, sid, configured.handoffDir, text => log($, text)),
             handoffSkillPath: await handoffRoots.resolve(cwdNow, sid, configured.handoffSkillPath, text => log($, text)) },
           log: text => log($, text),

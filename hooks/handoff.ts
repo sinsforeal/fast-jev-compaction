@@ -11,6 +11,8 @@ export type HandoffConfig = {
   handoffForceAt: number;
   handoffDir?: string;
   handoffSkillPath?: string;
+  /** 0.5.10: where handoffAt/handoffForceAt came from, e.g. `options` or `window.json (arm B)`. Logged with each order. */
+  windowSource?: string;
 };
 
 export type HandoffHost = {
@@ -94,11 +96,11 @@ async function runStep(host: HandoffHost, argv: string[]): Promise<boolean> {
  */
 export async function writeOrderMarker(
   host: HandoffHost, dir: string, sessionId: string,
-  marker: { order: 'soon' | 'now'; tokens: number | undefined; limit: number; attempt: number; reason?: string },
+  marker: { order: 'soon' | 'now'; tokens: number | undefined; limit: number; attempt: number; reason?: string; window?: string },
 ): Promise<string> {
   const path = sessionFile(dir, sessionId, 'order.json');
   try {
-    const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens ?? null, limit: marker.limit, attempt: marker.attempt, ...(marker.reason ? { reason: marker.reason } : {}) });
+    const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens ?? null, limit: marker.limit, attempt: marker.attempt, ...(marker.reason ? { reason: marker.reason } : {}), ...(marker.window ? { window: marker.window } : {}) });
     const tmp = `${path}.tmp`;
     await host.fs.write(tmp, body);
     const moved = await runStep(host, onWindows()
@@ -120,6 +122,11 @@ export async function clearOrderMarker(host: HandoffHost, dir: string, sessionId
       await log?.(`handoff: could not delete ${path}; rewrote it as order none`);
     }
   } catch { /* leave it */ }
+}
+
+/** `200000/250000 from window.json (arm B)` or `250000/300000 from options`; goes into order logs and the marker. */
+export function windowNote(config: HandoffConfig): string {
+  return `${config.handoffAt}/${config.handoffForceAt} from ${config.windowSource ?? 'options'}`;
 }
 
 export function soonOrder(visible: number, config: HandoffConfig, latest: string): string {
@@ -352,8 +359,8 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
         state.orderAt = await host.clock.now();
         await save(host, sessionId, state);
         await log(`handoff order repeated (${state.forcedOrders - 1} of ${MAX_FORCED_REPEATS}); file not complete: ${check.reason}`);
-        const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason });
-        await log(`handoff order marker rewritten: ${marker} (now, attempt ${state.forcedOrders}, ${visible ?? 'unknown'}/${config.handoffForceAt})`);
+        const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason, window: windowNote(config) });
+        await log(`handoff order marker rewritten: ${marker} (now, attempt ${state.forcedOrders}, ${visible ?? 'unknown'}/${config.handoffForceAt}; window ${windowNote(config)})`);
         queueOrder(nowOrder(visible, config, latest, state.forceReason));
       } else {
         state.gaveUp = true;
@@ -374,9 +381,9 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
       state.forcedOrders = 1;
       state.orderAt = await host.clock.now();
       await save(host, sessionId, state);
-      const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason });
+      const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason, window: windowNote(config) });
       const cause = state.forceReason ? `forced by ${state.forceReason}; actual context tokens ${visible ?? 'unavailable'}` : `at ~${visible} tokens (limit ${config.handoffForceAt})`;
-      await log(`handoff order NOW ${cause}; marker ${marker} (order now); expecting ${latest}`);
+      await log(`handoff order NOW ${cause}; window ${windowNote(config)}; marker ${marker} (order now); expecting ${latest}`);
       queueOrder(nowOrder(visible, config, latest, state.forceReason));
     }
     return;
@@ -387,8 +394,8 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
     state.orderAt = await host.clock.now();
     state.soonOrders = (state.soonOrders ?? 0) + 1;
     await save(host, sessionId, state);
-    const marker = await writeOrderMarker(host, dir, sessionId, { order: 'soon', tokens: visible, limit: config.handoffAt, attempt: state.soonOrders });
-    await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}); marker ${marker} (order soon); expecting ${latest}`);
+    const marker = await writeOrderMarker(host, dir, sessionId, { order: 'soon', tokens: visible, limit: config.handoffAt, attempt: state.soonOrders, window: windowNote(config) });
+    await log(`handoff order SOON at ~${visible} tokens (write at ${config.handoffAt}, force at ${config.handoffForceAt}; window ${config.windowSource ?? 'options'}); marker ${marker} (order soon); expecting ${latest}`);
     queueOrder(soonOrder(visible, config, latest));
   }
 }
