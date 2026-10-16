@@ -2,7 +2,7 @@
 
 ## 0.5.9 - 2026-10-15
 
-- Keep the `/color` session color across the handoff clear. Before the clear the newest `agent-color` record is read from the outgoing transcript (streamed through grep/findstr, never loaded whole); after the clear and before HANDOFF RESUME it is re-applied with `/color <name>` through `$.command.run`. If the host lists no `color` command or the run fails, an identical record is appended to the new transcript, which only takes effect at the next resume. No record means nothing is done. A read error is logged and the handoff goes on.
+- Keep the `/color` session color across the handoff clear. Before the clear the newest `agent-color` record is read from the outgoing transcript (streamed through grep/findstr, never loaded whole); after the clear and before HANDOFF RESUME it is re-applied with `/color <name>` through `$.command.run`. If the host lists no `color` command or the run fails, only a log line: the new transcript is never rewritten for a color (`$.fs.write` replaces the whole file). No record means nothing is done. A read error is logged and the handoff goes on.
 
 ## 0.5.8 - 2026-10-15
 

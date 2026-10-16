@@ -100,20 +100,20 @@ describe('color carry across the handoff clear', () => {
     expect(s.logs.some(l => l.includes('could not read the session color'))).toBe(true);
   });
 
-  it('falls back to an identical record in the new transcript when /color is not listed', async () => {
+  it('never writes the new transcript when /color is not listed; logs instead', async () => {
     const s = setup({ scan: { exitCode: 0, stdout: `${rec('red')}\n` }, listed: [] });
     await s.step();
     expect(s.calls).toEqual(['run:clear', 'submit:HANDOFF RESUME']);
-    const written = JSON.parse(s.files.get(NEW_JSONL)!.trim());
-    expect(written).toEqual({ type: 'agent-color', agentColor: 'red', sessionId: NEW });
-    expect(s.logs.some(l => l.includes('next resume'))).toBe(true);
+    expect(s.files.has(NEW_JSONL)).toBe(false);
+    expect(s.host.fs.write.mock.calls.some((c: unknown[]) => c[0] === NEW_JSONL)).toBe(false);
+    expect(s.logs.some(l => l.includes('not carried'))).toBe(true);
   });
 
-  it('falls back when /color fails, and a failing fallback write cannot break the handoff', async () => {
+  it('a failing /color logs, writes nothing and cannot break the handoff', async () => {
     const s = setup({ scan: { exitCode: 0, stdout: `${rec('red')}\n` }, colorRun: new Error('refused') });
-    s.host.fs.write.mockImplementation(async (p: string) => { if (p === NEW_JSONL) throw new Error('disk'); });
     await s.step();
     expect(s.calls).toEqual(['run:clear', 'submit:HANDOFF RESUME']);
+    expect(s.host.fs.write.mock.calls.some((c: unknown[]) => c[0] === NEW_JSONL)).toBe(false);
     expect(s.logs.some(l => l.includes('color not carried'))).toBe(true);
   });
 

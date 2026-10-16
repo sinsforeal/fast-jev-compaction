@@ -63,8 +63,8 @@ export async function readSessionColor(host: Pick<ColorHost, 'process'>, path: s
 
 /**
  * Re-applies the color in the new session: `/color <name>` through `$.command.run` (the route the
- * clear uses). If the host lists no `color` command or the run fails, append an identical record to the
- * new transcript instead; that only takes effect at the next resume.
+ * clear uses). If the host lists no `color` command or the run fails, only a log line: the transcript is
+ * never rewritten for a color.
  */
 export async function carryColor(
   host: ColorHost, record: AgentColorRecord, newSessionId: string, newTranscript: string | undefined,
@@ -78,17 +78,14 @@ export async function carryColor(
         await host.command.run({ command: 'color', args: record.agentColor });
         await log(`handoff carried the session color (${record.agentColor}) with /color`);
         return;
-      } catch { await log('handoff: /color failed after the clear; falling back to a transcript record'); }
+      } catch { await log(`handoff: /color ${record.agentColor} failed after the clear; color not carried`); return; }
     }
-    if (!newTranscript) { await log('handoff: color not carried (no transcript path for the new session)'); return; }
-    const copy: AgentColorRecord = { ...record, sessionId: newSessionId };
-    for (const key of ['uuid', 'timestamp'] as const) if (key in record) copy[key] = key === 'uuid' ? uuid4() : new Date().toISOString();
-    let prior = '';
-    try { if (await host.fs.exists(newTranscript)) prior = await host.fs.read(newTranscript); } catch { prior = ''; }
-    if (prior && !prior.endsWith('\n')) prior += '\n';
-    await host.fs.write(newTranscript, `${prior}${JSON.stringify(copy)}\n`);
-    await log(`handoff wrote an agent-color record (${record.agentColor}) to the new transcript; it takes effect at the next resume`);
+    // No transcript write fallback (Ryan v2 review 2026-10-15): $.fs.write replaces the whole file, so a
+    // failed read or a host append in between would destroy the new session's transcript. A lost color
+    // is cheap; a lost transcript is not.
+    void newSessionId; void newTranscript;
+    await log(`handoff: no /color command listed by the host; color ${record.agentColor} not carried`);
   } catch {
-    await log('handoff: color not carried (write failed); the handoff goes on');
+    await log('handoff: color not carried; the handoff goes on');
   }
 }
