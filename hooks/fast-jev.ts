@@ -11,6 +11,7 @@ import type {
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
 import { handoffStep, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
+import { createWarmState, warmIdle, warmSubmit, type WarmHost } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -46,13 +47,15 @@ const HOOK_DEFAULTS = {
   model: DEFAULT_MODEL,
   logDecisions: false,
   maxPostCompactTokens: 0,
+  idleWarmMinutes: 0,
+  idleWarmMax: 6,
 };
 
 /** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.10/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.11/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -95,6 +98,10 @@ export type HookConfig = CompactOptions & {
   model: string;
   logDecisions: boolean;
   maxPostCompactTokens: number;
+  /** 0 = off. Otherwise a cache-warming fork this many minutes after each turn ends. */
+  idleWarmMinutes: number;
+  /** Warms per idle gap before the session counts as abandoned. */
+  idleWarmMax: number;
 };
 
 class JevRequestError extends Error {}
@@ -144,6 +151,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
     logDecisions: typeof options.logDecisions === 'boolean' ? options.logDecisions : HOOK_DEFAULTS.logDecisions,
     maxPostCompactTokens: Math.max(0, Math.floor(optionNumber(options, 'maxPostCompactTokens', HOOK_DEFAULTS.maxPostCompactTokens))),
+    idleWarmMinutes: Math.max(0, optionNumber(options, 'idleWarmMinutes', HOOK_DEFAULTS.idleWarmMinutes)),
+    idleWarmMax: positive(optionNumber(options, 'idleWarmMax', HOOK_DEFAULTS.idleWarmMax), HOOK_DEFAULTS.idleWarmMax),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -689,6 +698,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
   const loadedSessions = new Set<string>();
+  // 0.5.11: idle cache warm; a no-op object while idleWarmMinutes is 0. Logs go to the disk log only.
+  const idleWarm = createWarmState(configured.idleWarmMinutes, configured.idleWarmMax);
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
       await loadedReceipt($ as unknown as LogHost, loadedSessions);
@@ -713,11 +724,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
     await loadedReceipt($, loadedSessions);
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
+    if (idleWarm.enabled && sid) { warmSubmit(idleWarm, sid); }
     const ledger = ledgerFor(sid);
     let snapshot: SessionMessage[] = [];
     try { snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
     const position = ledger.position();
     const result = await next(event);
+    // A dropped submission runs no turn, so no turn.complete would re-arm the warm.
+    if (idleWarm.enabled && sid && result.drop !== undefined) warmIdle($ as unknown as WarmHost, idleWarm, sid);
     if (result.drop === undefined) {
       ledger.prompt(result.text, result.context ?? [], !!event.attachments?.length, snapshot, position, result.origin ?? event.origin);
     }
@@ -913,6 +927,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     await loadedReceipt($, loadedSessions);
+    if (idleWarm.enabled && event.agentId === undefined) {
+      try { warmIdle($ as unknown as WarmHost, idleWarm, await $.session.id()); } catch { /* the warm never blocks a turn */ }
+    }
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;
     let hybrid = false;
