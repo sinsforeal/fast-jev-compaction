@@ -10,6 +10,7 @@ import type {
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
 import { handoffStep, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
+import { transcriptPath } from './color-carry.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -51,7 +52,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.8/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.9/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -861,6 +862,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
           onIdChanged: (previous, id) => handoffRoots.seed(previous, id),
+          transcriptPathFor: async id => {
+            const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
+            const cwd = await resolvedCwd($);
+            return home && cwd ? transcriptPath(home, cwd, id) : undefined;
+          },
         });
       } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }

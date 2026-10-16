@@ -4,6 +4,8 @@
  * session without a complete handoff file that names this session.
  */
 
+import { carryColor, readSessionColor, type AgentColorRecord } from './color-carry.js';
+
 export type HandoffConfig = {
   handoffAt: number;
   handoffForceAt: number;
@@ -31,7 +33,7 @@ export type HandoffHost = {
     list: () => Promise<readonly { name: string }[]>;
   };
   /** 0.5.5: `$.process.run`, used only to rename and delete the order marker (`$.fs` has neither). */
-  process: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number }> };
+  process: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout?: string }> };
 };
 
 /** Per-session record under `handoff:<sessionId>` in `$.store`. */
@@ -185,6 +187,8 @@ export type StepContext = {
   detach: (work: () => Promise<void>) => void;
   /** Called when the clear changed the session id, before the files are copied (0.5.4: seeds the new id's handoff root). */
   onIdChanged?: (previous: string, id: string) => void;
+  /** 0.5.9: the transcript file of a session id, for the color carry; absent or undefined = no carry. */
+  transcriptPathFor?: (sessionId: string) => Promise<string | undefined>;
 };
 
 async function load(host: HandoffHost, sessionId: string): Promise<HandoffState> {
@@ -305,6 +309,12 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
             return;
           }
           if (await host.session.id() !== sessionId) return;
+          // 0.5.9: the clear drops the `/color` record with the old transcript; read it first.
+          let color: AgentColorRecord | undefined;
+          try {
+            const old = await ctx.transcriptPathFor?.(sessionId);
+            if (old) color = await readSessionColor(host, old);
+          } catch { await log('handoff: could not read the session color from the transcript; carrying on without it'); }
           try {
             await host.command.run({ command: 'clear' });
           } catch {
@@ -318,6 +328,11 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           const newId = await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
           await clearOrderMarker(host, dir, sessionId, log);
           if (newId && newId !== sessionId) await clearOrderMarker(host, dir, newId, log);
+          if (color) {
+            let target: string | undefined;
+            try { target = newId ? await ctx.transcriptPathFor?.(newId) : undefined; } catch { target = undefined; }
+            await carryColor(host, color, newId ?? sessionId, target, log);
+          }
           await log('handoff cleared the session; submitting the resume order');
           try {
             await host.prompt.submit({ text: resumeOrder(latest, config) });

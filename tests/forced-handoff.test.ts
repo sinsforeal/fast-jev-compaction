@@ -329,7 +329,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.8/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.9/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

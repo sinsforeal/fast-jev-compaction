@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.9 - 2026-10-15
+
+- Keep the `/color` session color across the handoff clear. Before the clear the newest `agent-color` record is read from the outgoing transcript (streamed through grep/findstr, never loaded whole); after the clear and before HANDOFF RESUME it is re-applied with `/color <name>` through `$.command.run`. If the host lists no `color` command or the run fails, an identical record is appended to the new transcript, which only takes effect at the next resume. No record means nothing is done. A read error is logged and the handoff goes on.
+
 ## 0.5.8 - 2026-10-15
 
 - A reduction strictly below `minReductionRatio` now retains history and pins and immediately forces a written HANDOFF NOW. Exactly 25% passes at the default floor. This also covers unscored recovery and late-delivery ratio misses. Missing, changed or unreadable `DISABLE_AUTO_COMPACT` never restores built-in summary fallback. The older release notes below describe their historical behavior, not the 0.5.8 policy.
