@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.10 - 2026-10-16
+
+- Add a per-tree handoff window override: `<handoffDir>/window.json` `{"handoffAt", "handoffForceAt", "arm", "until"}`. User-level `pluginConfigs` give one value to every tree; this file lets each tree run its own window. Read live at each turn completion and ratio miss, cached by mtime (one stat when unchanged). Missing file: options win, silent. Malformed JSON, non-numbers or `handoffAt` under 50000: ignored, one warning per mtime. `handoffForceAt` is still raised to `handoffAt` if lower.
+- Log a change of the effective window once in `~/.claude/fast-jev-compaction.log` (`handoff window 200000/250000 from window.json (arm B)`, `handoff window back to options 250000/300000`). SOON and NOW log lines and `order.json` now carry the window and its source, for trial readouts.
+- Tests: `tests/handoff-window.test.ts` (absent, valid, malformed, non-number, below floor, force below at, mtime cache, change logged once). Installation and a live handoff under a window file remain deployment checks.
+
 ## 0.5.9 - 2026-10-15
 
 - Keep the `/color` session color across the handoff clear. Before the clear the newest `agent-color` record is read from the outgoing transcript (streamed through grep/findstr, never loaded whole); after the clear and before HANDOFF RESUME it is re-applied with `/color <name>` through `$.command.run`. If the host lists no `color` command or the run fails, only a log line: the new transcript is never rewritten for a color (`$.fs.write` replaces the whole file). No record means nothing is done. A read error is logged and the handoff goes on.

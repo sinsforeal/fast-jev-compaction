@@ -140,6 +140,7 @@ put it in a source file.
 | `handoffAt` | `250000` | With `DISABLE_AUTO_COMPACT=1`: visible size at which HANDOFF SOON is ordered, again per 50000 tokens of growth |
 | `handoffForceAt` | `300000` | With `DISABLE_AUTO_COMPACT=1`: visible size at which HANDOFF NOW is ordered (raised to `handoffAt` if lower). A ratio miss forces NOW regardless of this size |
 | `handoffDir` | `var/handoffs` | Session files live in `<handoffDir>/<sessionId>/` (`latest.md`, `resumed.json`, `prune_skipped.json`, `order.json`); `<handoffDir>/current_session.json` follows the id. Relative paths use the cwd captured on the session's first compaction or turn-complete callback, cached per session id; later cwd changes do not move the files. Absolute paths share one root |
+| `window.json` | none | Not an option: a per-tree override file, see "Per-tree handoff window" below |
 | `handoffSkillPath` | `docs/HANDOFF_SKILL.md` | Path cited in the orders; relative paths use the same captured cwd as `handoffDir` |
 
 The plugin never requests the built-in summary. A reduction-ratio miss returns `{ skip }`, retains history and pins, writes `prune_skipped.json` and requests HANDOFF NOW immediately. This applies when `DISABLE_AUTO_COMPACT` is `1`, missing, another value or unreadable, even below the token thresholds or without usage counts. The persisted force reason continues the cycle after callback reload or loss of the flag. Every log line starts with `[first 8 chars of the session id]`.
@@ -153,6 +154,21 @@ Handoff flow:
 6. After the detached delay, check the session id and file again. Write `resumed.json` with `{ by, file, mtime, at }`, log the pending clear, then revalidate the file and session id immediately before `$.command.run({ command: "clear" })`. The file must still be valid and have the same mtime and size as the version recorded in `resumed.json`. Any invalid/replaced file or changed session retains context. The marker is written before these final checks, so its presence alone does not prove a clear.
 7. Read `$.session.id()` after clear. If changed, copy latest.md and resumed.json into the new id's folder. Write `current_session.json`, remove pending-order markers and submit HANDOFF RESUME naming latest.md and the skill's Resume section.
 8. Missing or invalid files cause at most 3 later NOW repeats, one per completion, after the initial order. The completion that first forced NOW does not duplicate it. Aborted turns neither repeat nor clear. After the repeat budget, log "handoff not written" and retain context. A missing/unreadable clear capability blocks clear; a failing clear gets at most 3 attempts. Neither path requests a summary or submits RESUME without a successful clear.
+
+#### Per-tree handoff window
+
+`pluginConfigs` is user-level, so `handoffAt` and `handoffForceAt` are one value for every tree. For a
+different window per tree, put `window.json` in the resolved `handoffDir` (default: `<session cwd>/var/handoffs/window.json`):
+
+```json
+{"handoffAt": 200000, "handoffForceAt": 250000, "arm": "B", "until": "2026-10-17T01:00"}
+```
+
+- Read at each turn completion and ratio miss, cached by mtime (unchanged file = one stat, no parse). Edit it live, no restart.
+- `handoffAt` must be a number of at least 50000. `handoffForceAt` is raised to `handoffAt` if lower. Either key may be left out; the option value fills in.
+- Missing file: the options win, nothing is logged. Malformed JSON, a non-number, or `handoffAt` under 50000: the file is ignored, the options stay, one warning per mtime in `~/.claude/fast-jev-compaction.log`.
+- `arm` and `until` are labels only. A change (file appears, changes, disappears) logs one line, e.g. `handoff window 200000/250000 from window.json (arm B)` or `handoff window back to options 250000/300000`.
+- Each SOON/NOW log line carries `window <at>/<force> from <source>`, and `order.json` has a `window` field, so a trial readout shows which arm a handoff ran under.
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -239,7 +255,7 @@ probabilities. Error bodies and credentials are omitted. Recovery reasons and
 chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
 
 The first callback for each session per registration writes a disk-only receipt:
-`module-loaded hook=fast-jev-compaction@0.5.9/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+`module-loaded hook=fast-jev-compaction@0.5.10/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
 The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
 value or error body. A cache or manifest version alone is not a loaded receipt.
 Callback re-registration can emit another receipt for the same session.
@@ -282,7 +298,7 @@ own automatic compaction; the plugin cannot disable an independent harness path.
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.9 before reloading,
+Confirm both marketplace and cached plugin manifests say 0.5.10 before reloading,
 then require a fresh callback `module-loaded` receipt for the intended full session id.
 Native function-hook scanning and a live handoff remain separate install checks;
 unit tests and a version string do not prove either.
