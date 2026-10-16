@@ -170,6 +170,8 @@ different window per tree, put `window.json` in the resolved `handoffDir` (defau
 - `handoffAt` must be a number of at least 50000. `handoffForceAt` is raised to `handoffAt` if lower. Either key may be left out; the option value fills in.
 - Missing file: the options win, nothing is logged. Malformed JSON, a non-number, or `handoffAt` under 50000: the file is ignored, the options stay, one warning per mtime in `~/.claude/fast-jev-compaction.log`.
 - `arm` and `until` are labels only. A change (file appears, changes, disappears) logs one line, e.g. `handoff window 200000/250000 from window.json (arm B)` or `handoff window back to options 250000/300000`.
+- 0.5.12: the file may also carry `idleWarmMinutes` and `idleWarmMax` (numbers), which override the two options of the same name for this tree only, see "Idle cache warm". A missing key falls back to the option. `idleWarmMinutes: 0` switches the warm off for the tree even if the option is on; a tree with the option off and `idleWarmMinutes: 50` in its file warms. `idleWarmMax: 0` means the option value (as for the option). A non-number or negative warm value rejects the whole file, same as a bad `handoffAt`: one warning per mtime, the options stay in force. A file with only warm keys is valid.
+- The warm reads the per-tree value at each arm (every main `turn.complete`, and a dropped submission), so editing the file takes effect at the next turn end. A gap already armed keeps the interval and cap it was armed with. When the file carries a warm key the change line names it: `handoff window 150000/200000, idle warm 50 min x2 from window.json (arm block1 W1 S1)` (`idle warm off` when minutes is 0).
 - Each SOON/NOW log line carries `window <at>/<force> from <source>`, and `order.json` has a `window` field, so a trial readout shows which arm a handoff ran under.
 
 #### Idle cache warm
@@ -267,7 +269,7 @@ probabilities. Error bodies and credentials are omitted. Recovery reasons and
 chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
 
 The first callback for each session per registration writes a disk-only receipt:
-`module-loaded hook=fast-jev-compaction@0.5.11/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+`module-loaded hook=fast-jev-compaction@0.5.12/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
 The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
 value or error body. A cache or manifest version alone is not a loaded receipt.
 Callback re-registration can emit another receipt for the same session.
@@ -310,7 +312,7 @@ own automatic compaction; the plugin cannot disable an independent harness path.
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.11 before reloading,
+Confirm both marketplace and cached plugin manifests say 0.5.12 before reloading,
 then require a fresh callback `module-loaded` receipt for the intended full session id.
 Native function-hook scanning and a live handoff remain separate install checks;
 unit tests and a version string do not prove either.

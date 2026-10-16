@@ -11,7 +11,7 @@ import type {
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
 import { handoffStep, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
-import { createWarmState, warmIdle, warmSubmit, type WarmHost } from './idle-warm.js';
+import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -55,7 +55,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.11/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.12/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -534,7 +534,7 @@ async function resolvedCwd($: CwdHost): Promise<string | undefined> {
  */
 const WINDOW_FILE = 'window.json';
 const WINDOW_MIN_AT = 50_000;
-type WindowFile = { handoffAt?: number; handoffForceAt?: number; arm?: string; until?: string };
+type WindowFile = { handoffAt?: number; handoffForceAt?: number; idleWarmMinutes?: number; idleWarmMax?: number; arm?: string; until?: string };
 type WindowState = {
   /** path -> parse result of the file at that mtime (value undefined = rejected). */
   cache: Map<string, { mtimeMs: number; value?: WindowFile }>;
@@ -546,7 +546,18 @@ type WindowState = {
 type WindowHost = LogHost & CwdHost & {
   fs: { stat: (path: string) => Promise<{ kind: string; size: number; mtimeMs: number }> };
 };
-type EffectiveWindow = { handoffAt: number; handoffForceAt: number; windowSource: string };
+/** idleWarm*: the effective per-tree warm (0.5.12). `warmFromFile` = window.json carries a warm key (log only). */
+type EffectiveWindow = {
+  handoffAt: number; handoffForceAt: number; windowSource: string;
+  idleWarmMinutes: number; idleWarmMax: number; warmFromFile: boolean;
+};
+
+function optionsWindow(configured: HookConfig): EffectiveWindow {
+  return {
+    handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options',
+    idleWarmMinutes: configured.idleWarmMinutes, idleWarmMax: configured.idleWarmMax, warmFromFile: false,
+  };
+}
 
 function createWindowState(): WindowState {
   return { cache: new Map(), warned: new Map(), last: new Map() };
@@ -565,7 +576,17 @@ function parseWindowFile(text: string): WindowFile | string {
     if (typeof v !== 'number' || !Number.isFinite(v)) return `${key} is not a number`;
     out[key] = Math.floor(v);
   }
-  if (out.handoffAt === undefined && out.handoffForceAt === undefined) return 'no handoffAt or handoffForceAt';
+  // 0.5.12: same rule as handoffAt: a non-number or negative value rejects the whole file.
+  for (const key of ['idleWarmMinutes', 'idleWarmMax'] as const) {
+    if (rec[key] === undefined) continue;
+    const v = rec[key];
+    if (typeof v !== 'number' || !Number.isFinite(v)) return `${key} is not a number`;
+    if (v < 0) return `${key} ${v} is negative`;
+    out[key] = Math.floor(v);
+  }
+  if (out.handoffAt === undefined && out.handoffForceAt === undefined && out.idleWarmMinutes === undefined && out.idleWarmMax === undefined) {
+    return 'no handoffAt, handoffForceAt, idleWarmMinutes or idleWarmMax';
+  }
   if (out.handoffAt !== undefined && out.handoffAt < WINDOW_MIN_AT) return `handoffAt ${out.handoffAt} is below ${WINDOW_MIN_AT}`;
   if (out.handoffForceAt !== undefined && out.handoffForceAt <= 0) return `handoffForceAt ${out.handoffForceAt} is not positive`;
   if (typeof rec.arm === 'string' && rec.arm) out.arm = rec.arm;
@@ -577,7 +598,7 @@ function parseWindowFile(text: string): WindowFile | string {
 async function effectiveWindow($: WindowHost, configured: HookConfig, dir: string, state: WindowState): Promise<EffectiveWindow> {
   const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
   const path = `${dir.replace(/[\\/]+$/, '')}${sep}${WINDOW_FILE}`;
-  const options: EffectiveWindow = { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+  const options = optionsWindow(configured);
   let result = options;
   try {
     let mtimeMs: number | undefined;
@@ -601,16 +622,25 @@ async function effectiveWindow($: WindowHost, configured: HookConfig, dir: strin
       if (entry.value) {
         const at = entry.value.handoffAt ?? configured.handoffAt;
         const force = Math.max(entry.value.handoffForceAt ?? configured.handoffForceAt, at);
-        result = { handoffAt: at, handoffForceAt: force, windowSource: entry.value.arm ? `window.json (arm ${entry.value.arm})` : 'window.json' };
+        const warmMax = entry.value.idleWarmMax && entry.value.idleWarmMax > 0 ? entry.value.idleWarmMax : configured.idleWarmMax; // 0 = option, as for the option itself
+        result = {
+          handoffAt: at, handoffForceAt: force,
+          windowSource: entry.value.arm ? `window.json (arm ${entry.value.arm})` : 'window.json',
+          idleWarmMinutes: entry.value.idleWarmMinutes ?? configured.idleWarmMinutes, idleWarmMax: warmMax,
+          warmFromFile: entry.value.idleWarmMinutes !== undefined || entry.value.idleWarmMax !== undefined,
+        };
       }
     }
-    const key = `${result.windowSource} ${result.handoffAt}/${result.handoffForceAt}`;
+    const warmText = result.warmFromFile
+      ? `, idle warm ${result.idleWarmMinutes > 0 ? `${result.idleWarmMinutes} min x${result.idleWarmMax}` : 'off'}`
+      : '';
+    const key = `${result.windowSource} ${result.handoffAt}/${result.handoffForceAt}${warmText}`;
     const before = state.last.get(path) ?? `options ${options.handoffAt}/${options.handoffForceAt}`;
     if (key !== before) {
       state.last.set(path, key);
       await appendLog($, await tag($, result.windowSource === 'options'
         ? `handoff window back to options ${result.handoffAt}/${result.handoffForceAt}`
-        : `handoff window ${result.handoffAt}/${result.handoffForceAt} from ${result.windowSource}${state.cache.get(path)?.value?.until ? ` until ${state.cache.get(path)!.value!.until}` : ''}`));
+        : `handoff window ${result.handoffAt}/${result.handoffForceAt}${warmText} from ${result.windowSource}${state.cache.get(path)?.value?.until ? ` until ${state.cache.get(path)!.value!.until}` : ''}`));
     }
   } catch { result = options; }
   return result;
@@ -618,13 +648,22 @@ async function effectiveWindow($: WindowHost, configured: HookConfig, dir: strin
 
 /** Resolves the session's handoff dir and returns the config pieces every handoff decision uses. */
 async function windowFor($: WindowHost, configured: HookConfig, roots: HandoffRoots, sid: string, cwd: string | undefined, state: WindowState): Promise<EffectiveWindow> {
-  if (!configured.handoffDir || !sid) return { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+  if (!configured.handoffDir || !sid) return optionsWindow(configured);
   try {
     const dir = await roots.resolve(cwd, sid, configured.handoffDir, text => log($, text));
     return await effectiveWindow($, configured, dir, state);
   } catch {
-    return { handoffAt: configured.handoffAt, handoffForceAt: configured.handoffForceAt, windowSource: 'options' };
+    return optionsWindow(configured);
   }
+}
+
+/** Arms (or clears) the idle warm for a session with the per-tree config in force right now. Never throws. */
+async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roots: HandoffRoots, sid: string, state: WindowState, warm: WarmState): Promise<void> {
+  try {
+    const cwd = await resolvedCwd($);
+    const win = await windowFor($, configured, roots, sid, cwd, state);
+    warmIdle($, warm, sid, win.idleWarmMinutes, win.idleWarmMax);
+  } catch { /* the warm never blocks a turn */ }
 }
 
 /** A callback receipt, not a manifest/cache assertion. Disk only, once per session. */
@@ -698,8 +737,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
   const loadedSessions = new Set<string>();
-  // 0.5.11: idle cache warm; a no-op object while idleWarmMinutes is 0. Logs go to the disk log only.
-  const idleWarm = createWarmState(configured.idleWarmMinutes, configured.idleWarmMax);
+  // 0.5.11 idle cache warm. 0.5.12: interval and cap come from the per-tree config at each arm, so the
+  // state is always live and armIdleWarm decides on or off. Logs go to the disk log only.
+  const idleWarm = createWarmState();
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
       await loadedReceipt($ as unknown as LogHost, loadedSessions);
@@ -724,14 +764,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
     await loadedReceipt($, loadedSessions);
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
-    if (idleWarm.enabled && sid) { warmSubmit(idleWarm, sid); }
+    if (sid) { warmSubmit(idleWarm, sid); }
     const ledger = ledgerFor(sid);
     let snapshot: SessionMessage[] = [];
     try { snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
     const position = ledger.position();
     const result = await next(event);
     // A dropped submission runs no turn, so no turn.complete would re-arm the warm.
-    if (idleWarm.enabled && sid && result.drop !== undefined) warmIdle($ as unknown as WarmHost, idleWarm, sid);
+    if (sid && result.drop !== undefined) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, sid, windows, idleWarm);
     if (result.drop === undefined) {
       ledger.prompt(result.text, result.context ?? [], !!event.attachments?.length, snapshot, position, result.origin ?? event.origin);
     }
@@ -927,8 +967,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     await loadedReceipt($, loadedSessions);
-    if (idleWarm.enabled && event.agentId === undefined) {
-      try { warmIdle($ as unknown as WarmHost, idleWarm, await $.session.id()); } catch { /* the warm never blocks a turn */ }
+    if (event.agentId === undefined) {
+      try {
+        const warmSid = await $.session.id();
+        if (warmSid) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, warmSid, windows, idleWarm);
+      } catch { /* the warm never blocks a turn */ }
     }
     if (compacting || event.agentId !== undefined) return next(event);
     let ownsCompaction = false;

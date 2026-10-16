@@ -1,5 +1,6 @@
 /**
- * 0.5.11: idle cache warm. Off unless `idleWarmMinutes` > 0.
+ * 0.5.11: idle cache warm. Off unless the effective `idleWarmMinutes` > 0.
+ * 0.5.12: the interval and cap are the per-tree values (window.json over the options), taken at each arm.
  *
  * The main conversation runs a one-hour prompt cache. A gap past it makes the next turn
  * rewrite the whole context at the write price. After each main-thread turn.complete this
@@ -33,20 +34,19 @@ export type WarmHost = {
 };
 
 type Cancel = { cancel: () => void };
-type Gap = { timer?: Cancel; count: number; running: boolean; warming: boolean };
+/** minutes/max are the per-tree values taken when the gap was armed (0.5.12). */
+type Gap = { timer?: Cancel; count: number; running: boolean; warming: boolean; minutes: number; max: number };
 
 export type WarmState = {
-  enabled: boolean;
-  minutes: number;
-  max: number;
   gaps: Map<string, Gap>;
 };
 
 /** Smallest prompt that still gets a reply. Fork has no maxTokens knob, so the text is the cap. */
 export const WARM_PROMPT = 'Reply with the single word ok.';
 
-export function createWarmState(minutes: number, max: number): WarmState {
-  return { enabled: minutes > 0, minutes, max, gaps: new Map() };
+/** 0.5.12: no global on/off. The interval and cap come from the effective per-tree config at each arm. */
+export function createWarmState(): WarmState {
+  return { gaps: new Map() };
 }
 
 const LOG_FILE = '.claude/fast-jev-compaction.log';
@@ -70,7 +70,7 @@ async function warmLog($: WarmHost, text: string): Promise<void> {
 
 function gapFor(state: WarmState, sid: string): Gap {
   let gap = state.gaps.get(sid);
-  if (!gap) { gap = { count: 0, running: false, warming: false }; state.gaps.set(sid, gap); }
+  if (!gap) { gap = { count: 0, running: false, warming: false, minutes: 0, max: 0 }; state.gaps.set(sid, gap); }
   return gap;
 }
 
@@ -80,25 +80,25 @@ function cancelTimer(gap: Gap): void {
   try { timer?.cancel(); } catch { /* a timer that cannot be cancelled is skipped when it fires */ }
 }
 
-function armWarm($: WarmHost, state: WarmState, gap: Gap): void {
+function armWarm($: WarmHost, gap: Gap): void {
   cancelTimer(gap);
   try {
     const mine: { handle?: Cancel } = {};
-    const handle = $.clock.after(state.minutes * 60_000, () => {
-      void fireWarm($, state, gap, mine).catch(() => { /* never throws out of the timer */ });
+    const handle = $.clock.after(gap.minutes * 60_000, () => {
+      void fireWarm($, gap, mine).catch(() => { /* never throws out of the timer */ });
     });
     mine.handle = handle;
     gap.timer = handle;
   } catch { /* no clock: no warm */ }
 }
 
-async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?: Cancel }): Promise<void> {
+async function fireWarm($: WarmHost, gap: Gap, mine: { handle?: Cancel }): Promise<void> {
   if (gap.timer === undefined || gap.timer !== mine.handle) return; // cancelled or replaced
   gap.timer = undefined;
   if (gap.running || gap.warming) return; // a turn runs: its turn.complete re-arms
   gap.warming = true;
   const n = gap.count + 1;
-  const after = n * state.minutes;
+  const after = n * gap.minutes;
   try {
     const result = await $.model.fork({ prompt: WARM_PROMPT });
     if (gap.running || gap.timer !== undefined) return; // a prompt came meanwhile: its turn owns the next arm
@@ -109,7 +109,7 @@ async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?
     }
     const u = result.usage;
     await warmLog($, `idle warm ${n} after ${after} min: cache_read ${u.cache_read_input_tokens}, cache_write ${u.cache_creation_input_tokens}, out ${u.output_tokens}`);
-    if (n < state.max) armWarm($, state, gap);
+    if (n < gap.max) armWarm($, gap);
   } catch {
     gap.count = n;
     try { await warmLog($, `idle warm ${n} failed after ${after} min: fork threw; warming stops for this gap`); } catch { /* swallowed */ }
@@ -120,7 +120,6 @@ async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?
 
 /** A prompt was submitted: a turn is about to run. Cancels the timer and starts a new gap. */
 export function warmSubmit(state: WarmState, sid: string): void {
-  if (!state.enabled) return;
   try {
     const gap = gapFor(state, sid);
     gap.running = true;
@@ -130,14 +129,17 @@ export function warmSubmit(state: WarmState, sid: string): void {
 }
 
 /** A main-thread turn finished (or a submission was dropped): the idle gap starts now. */
-export function warmIdle($: WarmHost, state: WarmState, sid: string): void {
-  if (!state.enabled) return;
+export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: number, max: number): void {
   try {
     const gap = gapFor(state, sid);
     // During a warm, a turn.complete with no prompt before it is the fork's own: ignore it.
     if (gap.warming && !gap.running) return;
     gap.running = false;
     gap.count = 0;
-    armWarm($, state, gap);
+    gap.minutes = minutes;
+    gap.max = max;
+    // 0 = off for this tree (also when the option is on): no timer.
+    if (!(minutes > 0)) { cancelTimer(gap); return; }
+    armWarm($, gap);
   } catch { /* never throws */ }
 }
