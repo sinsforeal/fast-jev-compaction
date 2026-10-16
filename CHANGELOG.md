@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.12 - 2026-10-16
+
+- Per-tree idle warm. `<handoffDir>/window.json` may carry `idleWarmMinutes` and `idleWarmMax`. They override the user-level options for that tree only, so the warm can be switched on for one orchestrator, measured, and later rotated as a trial arm. Missing key: the option. `idleWarmMinutes: 0`: off for the tree even if the option is on. A non-number or negative value rejects the whole file (one warning per mtime, options stay), same as `handoffAt`. `idleWarmMax: 0` means the option value.
+- The warm now takes the effective per-tree interval and cap at each arm (main `turn.complete`, dropped submission), through the same mtime cache as the handoff window. Editing window.json needs no restart. `createWarmState()` has no global on/off any more; `warmIdle` takes `minutes` and `max`. The timer and the `idle warm <n> after <m> min: cache_read ...` log line are unchanged.
+- The window-change log line names the warm when the file has a warm key: `handoff window 150000/200000, idle warm 50 min x2 from window.json (arm block1 W1 S1)`.
+- Cost: one window.json stat per main turn end even with the option off (the handoff path already did one).
+- Tests: `tests/tree-warm.test.ts`. Version bumped everywhere (HOOK_ID now `fast-jev-compaction@0.5.12/forced-handoff-floor`).
+
 ## 0.5.11 - 2026-10-16
 
 - Add an opt-in idle cache warm (`idleWarmMinutes`, default 0 = off; `idleWarmMax`, default 6). After each main-thread turn.complete one `$.clock.after` timer per session is armed. When it fires and no turn runs, one `$.model.fork` with the prompt `Reply with the single word ok.` is sent, which reads the main conversation's cached prefix and resets its TTL; then it re-arms, up to `idleWarmMax` warms per gap. A new prompt.submit or turn.complete cancels and re-arms. Never submits a prompt, never warms during a turn, never throws out of the timer.
