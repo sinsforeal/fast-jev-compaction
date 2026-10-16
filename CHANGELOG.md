@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.13 - 2026-10-16
+
+- Color carry follows the session chain. 0.5.9 read the `agent-color` record only from the transcript being cleared; once one clear ran without carry (0.5.8), every later transcript had no record and the color stayed blank for good. Now, when the cleared session's transcript has none, the walk goes back through previous ids (`<handoffDir>/current_session.json`, then `log.jsonl` `resumed` rows: `previous_id`, or the folder of the resume `file` on older rows) up to 10 transcripts and stops at the newest one with a record. A `/color` record in the current session always wins.
+- Cache `<handoffDir>/color.json` `{agentColor, from_session, at}` is written whenever a transcript record is read, and used only when no transcript of the chain has one.
+- Log lines: `no agent-color record in <n> transcripts of the chain` (grep/findstr exit 1 is no record) is separate from `could not read the session color from the transcript (<k> read errors ...)`. A read error on one hop does not stop the walk. Existing `carried` and `not carried` lines unchanged.
+- Older transcripts that no longer exist are skipped, not errors. Code: `resolveColor` in `hooks/color-carry.ts`, called from `hooks/handoff.ts`. Tests in `tests/color-carry.test.ts`.
+
 ## 0.5.12 - 2026-10-16
 
 - Per-tree idle warm. `<handoffDir>/window.json` may carry `idleWarmMinutes` and `idleWarmMax`. They override the user-level options for that tree only, so the warm can be switched on for one orchestrator, measured, and later rotated as a trial arm. Missing key: the option. `idleWarmMinutes: 0`: off for the tree even if the option is on. A non-number or negative value rejects the whole file (one warning per mtime, options stay), same as `handoffAt`. `idleWarmMax: 0` means the option value.

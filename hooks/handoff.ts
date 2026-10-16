@@ -4,7 +4,7 @@
  * session without a complete handoff file that names this session.
  */
 
-import { carryColor, readSessionColor, type AgentColorRecord } from './color-carry.js';
+import { carryColor, resolveColor, type AgentColorRecord } from './color-carry.js';
 
 export type HandoffConfig = {
   handoffAt: number;
@@ -317,10 +317,11 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           }
           if (await host.session.id() !== sessionId) return;
           // 0.5.9: the clear drops the `/color` record with the old transcript; read it first.
+          // 0.5.13: walk the chain of previous sessions, then the color.json cache.
           let color: AgentColorRecord | undefined;
           try {
-            const old = await ctx.transcriptPathFor?.(sessionId);
-            if (old) color = await readSessionColor(host, old);
+            const pathFor = ctx.transcriptPathFor;
+            if (pathFor) color = await resolveColor(host, dir, sessionId, pathFor, log);
           } catch { await log('handoff: could not read the session color from the transcript; carrying on without it'); }
           try {
             await host.command.run({ command: 'clear' });
