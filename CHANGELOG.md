@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.14 - 2026-10-20
+
+- Order delivery no longer rests on `$.prompt.submit` alone. Session 21687c6d (Meta, 2026-10-20 12:07Z to 12:25Z) got four HANDOFF NOW orders logged and never saw one: no queue enqueue after any of them, no error, no log line. The order was queued with `void work()` and the submit result was never read.
+- The pending order text is kept per session (`pendingOrders` in `hooks/handoff.ts`, cleared with the order marker). The `prompt.submit` hook attaches it as `context` to the next prompt that enters from any origin (user, peer, notification), once per order text, unless the session already holds that text. Log line: `handoff order carried as context on the next prompt (<origin>)`.
+- New log lines for the own submit: `handoff order submit returned after N ms`, `handoff order submit DROPPED after N ms (<reason>)`, `handoff order not submitted: session id is X, order was for Y`. A submit that never resolves leaves none of them, which is itself the signal.
+- Tests: `tests/forced-handoff.test.ts` (0.5.14 describe). Version bumped everywhere (HOOK_ID `0.5.14`).
+
 ## 0.5.13 - 2026-10-16
 
 - Color carry follows the session chain. 0.5.9 read the `agent-color` record only from the transcript being cleared; once one clear ran without carry (0.5.8), every later transcript had no record and the color stayed blank for good. Now, when the cleared session's transcript has none, the walk goes back through previous ids (`<handoffDir>/current_session.json`, then `log.jsonl` `resumed` rows: `previous_id`, or the folder of the resume `file` on older rows) up to 10 transcripts and stops at the newest one with a record. A `/color` record in the current session always wins.

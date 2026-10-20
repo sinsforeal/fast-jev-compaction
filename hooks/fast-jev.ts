@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
-import { handoffStep, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
+import { handoffStep, pendingOrders, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -55,7 +55,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.13/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.14/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -737,6 +737,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
   const loadedSessions = new Set<string>();
+  const carriedOrders = new Map<string, string>();
   // 0.5.11 idle cache warm. 0.5.12: interval and cap come from the per-tree config at each arm, so the
   // state is always live and armIdleWarm decides on or off. Logs go to the disk log only.
   const idleWarm = createWarmState();
@@ -769,6 +770,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let snapshot: SessionMessage[] = [];
     try { snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }
     const position = ledger.position();
+    // 0.5.14: an order whose own $.prompt.submit never reached the model rides on the next prompt that enters.
+    const pending = sid ? pendingOrders.get(sid) : undefined;
+    if (pending && sid && (event.origin as { kind?: string } | undefined)?.kind !== 'plugin' && carriedOrders.get(sid) !== pending) {
+      const seen = snapshot.some(row => row.role === 'user' && row.text.includes(pending));
+      carriedOrders.set(sid, pending);
+      if (!seen) {
+        event = { ...event, context: [...(event.context ?? []), `The fast-jev-compaction plugin sent a message:\n${pending}`] };
+        await log($, `handoff order carried as context on the next prompt (${String((event.origin as { kind?: string } | undefined)?.kind ?? 'unknown')}); own submit had not reached the model`);
+      }
+    }
     const result = await next(event);
     // A dropped submission runs no turn, so no turn.complete would re-arm the warm.
     if (sid && result.drop !== undefined) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, sid, windows, idleWarm);

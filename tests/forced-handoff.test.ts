@@ -320,6 +320,51 @@ describe('registered forced handoff floor', () => {
   });
 });
 
+describe('0.5.14 order delivery when the plugin own submit never reaches the model', () => {
+  const promptEvent = (kind: string) => ({ text: 'peer says hi', wait: false, origin: { kind } });
+
+  it('attaches the pending order as context to the next prompt of any origin, once', async () => {
+    const h = harness();
+    // The own submit never resolves: no error, no enqueue (the 21687c6d case).
+    h.$.prompt.submit.mockImplementation(() => new Promise(() => {}));
+    await force(h);
+    const seen: any[] = [];
+    const next = async (e: any) => { seen.push(e); return { text: e.text, context: e.context }; };
+    await h.handlers['prompt.submit'](h.$, promptEvent('peer'), next);
+    expect(seen[0].context).toHaveLength(1);
+    expect(seen[0].context[0]).toContain('HANDOFF NOW: reduction 24.9% below 25% minimum');
+    expect(h.logs.some(line => line.includes('handoff order carried as context'))).toBe(true);
+    await h.handlers['prompt.submit'](h.$, promptEvent('notification'), next);
+    expect(seen[1].context).toBeUndefined();
+  });
+
+  it('does not attach it when the order text is already in the session, or for a plugin origin', async () => {
+    const h = harness();
+    await force(h);
+    const text = h.$.prompt.submit.mock.calls[0][0].text as string;
+    const seen: any[] = [];
+    const next = async (e: any) => { seen.push(e); return { text: e.text, context: e.context }; };
+    await h.handlers['prompt.submit'](h.$, promptEvent('plugin'), next);
+    expect(seen[0].context).toBeUndefined();
+    h.setRows([...h.getRows(), { role: 'user', text: `The fast-jev-compaction plugin sent a message:\n${text}`, toolUses: [] } as Message]);
+    await h.handlers['prompt.submit'](h.$, promptEvent('peer'), next);
+    expect(seen[1].context).toBeUndefined();
+  });
+
+  it('logs a dropped submit with its reason and stops carrying once the order is cleared', async () => {
+    const h = harness();
+    h.$.prompt.submit.mockImplementation(async () => ({ drop: 'blocked by a settings hook' }));
+    await force(h);
+    expect(h.logs.some(line => line.includes('submit DROPPED') && line.includes('blocked by a settings hook'))).toBe(true);
+    h.put(h.latest, h.good, 5000);
+    await h.turn();
+    await h.flush();
+    const seen: any[] = [];
+    await h.handlers['prompt.submit'](h.$, promptEvent('peer'), async (e: any) => { seen.push(e); return { text: e.text }; });
+    expect(seen[0].context).toBeUndefined();
+  });
+});
+
 describe('module-loaded callback receipt', () => {
   it.each(['1', 'unset', 'unreadable', 'other'] as const)('records build, full session and env read result %s on disk only, once', async flag => {
     const h = harness(flag);
@@ -329,7 +374,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.13/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.14/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

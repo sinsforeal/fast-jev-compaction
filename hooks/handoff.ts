@@ -65,6 +65,13 @@ export const MAX_CLEAR_FAILURES = 3;
 export const DETACH_DELAY_MS = 250;
 // Only live work is in memory. A module reload cannot strand a persisted in-flight flag.
 const pendingClears = new Set<string>();
+/**
+ * 0.5.14: the text of the SOON/NOW order that is out for a session and whose file is not complete yet.
+ * `$.prompt.submit` can end without the order ever reaching the model (21687c6d, 2026-10-20: four orders,
+ * no enqueue, no error, no log). The prompt.submit hook in fast-jev.ts reads this and attaches the text
+ * as `context` to the next prompt that enters, whatever its origin. Cleared with the order marker.
+ */
+export const pendingOrders = new Map<string, string>();
 
 export const stateKey = (sessionId: string): string => `handoff:${sessionId}`;
 
@@ -113,6 +120,7 @@ export async function writeOrderMarker(
 
 /** Removes order.json of one session folder. If the delete cannot run, the file is rewritten as {"order":"none"}. */
 export async function clearOrderMarker(host: HandoffHost, dir: string, sessionId: string, log?: (text: string) => Promise<void>): Promise<void> {
+  pendingOrders.delete(sessionId);
   const path = sessionFile(dir, sessionId, 'order.json');
   try {
     if (!(await host.fs.exists(path))) return;
@@ -267,13 +275,27 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   }
   // Repeated compact requests neither reset the repeat budget nor clear a session.
   if (pendingClears.has(sessionId) || (ctx.requestOnly && state.forcedOrders > 0)) return;
-  const queueOrder = (text: string): void => detach(async () => {
-    await pause(host);
-    try {
-      if (await host.session.id() !== sessionId) return;
-      await host.prompt.submit({ text });
-    } catch { await log('handoff order submit failed; context retained, retry budget unchanged'); }
-  });
+  const queueOrder = (text: string): void => {
+    pendingOrders.set(sessionId, text);
+    detach(async () => {
+      await pause(host);
+      try {
+        const current = await host.session.id();
+        if (current !== sessionId) {
+          await log(`handoff order not submitted: session id is ${current.slice(0, 8)}, order was for ${sessionId.slice(0, 8)}`);
+          return;
+        }
+        const startedAt = Date.now();
+        const result = await host.prompt.submit({ text }) as { drop?: unknown } | undefined;
+        const took = Date.now() - startedAt;
+        if (result && typeof result === 'object' && result.drop !== undefined) {
+          await log(`handoff order submit DROPPED after ${took} ms (${String(result.drop).slice(0, 200)}); the next prompt that enters carries the order`);
+        } else {
+          await log(`handoff order submit returned after ${took} ms (entered or queued)`);
+        }
+      } catch { await log('handoff order submit failed; context retained, retry budget unchanged; the next prompt that enters carries the order'); }
+    });
+  };
 
   // 1. An order is out: is the file complete and newer than it?
   if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
