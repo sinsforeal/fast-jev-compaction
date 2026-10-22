@@ -320,7 +320,7 @@ describe('registered forced handoff floor', () => {
   });
 });
 
-describe('0.5.14 order delivery when the plugin own submit never reaches the model', () => {
+describe('0.5.15 order delivery when the plugin own submit never reaches the model', () => {
   const promptEvent = (kind: string) => ({ text: 'peer says hi', wait: false, origin: { kind } });
 
   it('attaches the pending order as context to the next prompt of any origin, once', async () => {
@@ -374,7 +374,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.14/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.15/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

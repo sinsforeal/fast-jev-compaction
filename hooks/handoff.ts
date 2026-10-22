@@ -81,6 +81,48 @@ export function resolveAgainstCwd(cwd: string | undefined, path: string): string
   return `${cwd.replace(/[\\/]+$/, '')}${cwd.includes('\\') && !cwd.includes('/') ? '\\' : '/'}${path.replace(/^[.][\\/]/, '')}`;
 }
 
+/**
+ * 0.5.15: a handoff root never sits inside `<x>/var/handoffs`. A cwd (or stored root) at any depth
+ * under that folder is cut back to `<x>`; a path that starts with it is cut to the drive/root separator.
+ * Session 15635d41 (Mechanism_Analyst, 2026-10-22) captured `...\var\handoffs` and then expected
+ * `...\var\handoffs\var/handoffs\<sid>\latest.md`. Pure string work, never throws.
+ */
+export function normalizeRoot(root: string): string;
+export function normalizeRoot(root: string | undefined): string | undefined;
+export function normalizeRoot(root: string | undefined): string | undefined {
+  if (!root) return root;
+  const hit = /[\\/]var[\\/]+handoffs(?:[\\/]|$)/i.exec(root);
+  if (!hit) return root;
+  const cut = root.slice(0, hit.index);
+  if (cut === '' || /^[a-zA-Z]:$/.test(cut)) return root.slice(0, hit.index + 1);
+  return cut;
+}
+
+/** Same as normalizeRoot for a resolved handoff dir: the `<x>` of `<x>/var/handoffs...`, or undefined. */
+export function treeOfHandoffDir(dir: string): string | undefined {
+  const root = normalizeRoot(dir);
+  return root !== dir ? root : undefined;
+}
+
+/**
+ * 0.5.15: the tree root for a raw cwd. Normalised first, then the nearest ancestor (the cwd itself
+ * included) that holds `var/handoffs` or `.git` wins; none found = the normalised cwd. Never throws.
+ */
+export async function findTreeRoot(cwd: string, exists: (path: string) => Promise<boolean>): Promise<string> {
+  const start = normalizeRoot(cwd).replace(/[\\/]+$/, '');
+  const sep = start.includes('\\') && !start.includes('/') ? '\\' : '/';
+  let dir = start;
+  for (let depth = 0; depth < 16 && dir; depth++) {
+    try {
+      if (await exists(`${dir}${sep}var${sep}handoffs`) || await exists(`${dir}${sep}.git`)) return dir;
+    } catch { return start; }
+    const cut = Math.max(dir.lastIndexOf('\\'), dir.lastIndexOf('/'));
+    if (cut <= 0 || /^[a-zA-Z]:$/.test(dir.slice(0, cut))) return start;
+    dir = dir.slice(0, cut);
+  }
+  return start;
+}
+
 /** `<handoffDir>/<sessionId>/<name>`, with the separator the configured directory uses. */
 export function sessionFile(dir: string, sessionId: string, name: string): string {
   const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
@@ -202,6 +244,8 @@ export type StepContext = {
   detach: (work: () => Promise<void>) => void;
   /** Called when the clear changed the session id, before the files are copied (0.5.4: seeds the new id's handoff root). */
   onIdChanged?: (previous: string, id: string) => void;
+  /** 0.5.15: the session's tree root (captured, normalised); the fallback looks for `<treeRoot>/var/handoffs/<sid>/latest.md`. */
+  treeRoot?: string;
   /** 0.5.9: the transcript file of a session id, for the color carry; absent or undefined = no carry. */
   transcriptPathFor?: (sessionId: string) => Promise<string | undefined>;
 };
@@ -267,7 +311,30 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   const { sessionId, visible, config, log, detach } = ctx;
   const dir = config.handoffDir;
   if (!dir) return;
-  const latest = sessionFile(dir, sessionId, 'latest.md');
+  const expected = sessionFile(dir, sessionId, 'latest.md');
+  let latest = expected;
+  let activeDir = dir;
+  /** 0.5.15: the expected file is missing or stale; a complete `<treeRoot>/var/handoffs/<sid>/latest.md` is accepted. */
+  const altDirs: string[] = [];
+  for (const tree of [treeOfHandoffDir(dir), ctx.treeRoot ? normalizeRoot(ctx.treeRoot) : undefined]) {
+    if (!tree) continue;
+    const alt = `${tree.replace(/[\\/]+$/, '')}${tree.includes('\\') && !tree.includes('/') ? '\\' : '/'}var${tree.includes('\\') && !tree.includes('/') ? '\\' : '/'}handoffs`;
+    if (alt !== dir && !altDirs.includes(alt)) altDirs.push(alt);
+  }
+  const checkAny = async (orderAt: number): Promise<FileCheck> => {
+    const first = await checkLatest(host, latest, sessionId, orderAt);
+    if (first.ok || (first.reason !== 'missing' && first.reason !== 'older than the order')) return first;
+    for (const alt of altDirs) {
+      const path = sessionFile(alt, sessionId, 'latest.md');
+      if (path === latest) continue;
+      const found = await checkLatest(host, path, sessionId, orderAt);
+      if (!found.ok) continue;
+      await log(`handoff: expected ${latest} is ${first.reason}; accepting the complete ${path} (session ${sessionId.slice(0, 8)}) from the tree root`);
+      latest = path; activeDir = alt;
+      return found;
+    }
+    return first;
+  };
   const state = await load(host, sessionId);
   if (ctx.forceReason !== undefined && state.forceReason === undefined) {
     state.forceReason = ctx.forceReason;
@@ -299,7 +366,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
 
   // 1. An order is out: is the file complete and newer than it?
   if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
-    const check = await checkLatest(host, latest, sessionId, state.orderAt);
+    const check = await checkAny(state.orderAt);
     if (check.ok) {
       const canClear = await clearAvailable(host);
       // Another completion can schedule a clear while capability lookup is awaiting.
@@ -318,13 +385,13 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           if (await host.session.id() !== sessionId) return;
           // The file may have changed since the hook queued this work. Revalidate
           // after the detached delay; a stale/incomplete/missing file never clears.
-          const fresh = await checkLatest(host, latest, sessionId, state.orderAt!);
+          const fresh = await checkAny(state.orderAt!);
           if (!fresh.ok) {
             await log(`handoff changed before clear (${fresh.reason}); context retained`);
             return;
           }
           // resumed.json first: the SessionStart hook skips a file this names.
-          await host.fs.write(sessionFile(dir, sessionId, 'resumed.json'), JSON.stringify({
+          await host.fs.write(sessionFile(activeDir, sessionId, 'resumed.json'), JSON.stringify({
             by: 'plugin', file: latest, mtime: fresh.mtimeMs, at: new Date().toISOString(),
           }));
           if (await host.session.id() !== sessionId) return;
@@ -332,7 +399,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           if (await host.session.id() !== sessionId) return;
           // Marker writes and logs await host calls too. Nothing may clear a file
           // replaced during those awaits, or resume from a marker for another version.
-          const final = await checkLatest(host, latest, sessionId, state.orderAt!);
+          const final = await checkAny(state.orderAt!);
           if (!final.ok || final.mtimeMs !== fresh.mtimeMs || final.size !== fresh.size) {
             await log(`handoff changed immediately before clear (${final.ok ? 'file replaced' : final.reason}); context retained`);
             return;
@@ -355,7 +422,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
             if (again.clearFailures >= MAX_CLEAR_FAILURES) await clearOrderMarker(host, dir, sessionId, log);
             return;
           }
-          const newId = await followSessionId(host, dir, sessionId, latest, log, ctx.onIdChanged);
+          const newId = await followSessionId(host, activeDir, sessionId, latest, log, ctx.onIdChanged);
           await clearOrderMarker(host, dir, sessionId, log);
           if (newId && newId !== sessionId) await clearOrderMarker(host, dir, newId, log);
           if (color) {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.15 - 2026-10-22
+
+- Handoff root drift fixed. Session 15635d41 (Mechanism_Analyst, 2026-10-22 05:37) captured `F:\REPS2\Mechanism_Analyst\var\handoffs` as its root, so the plugin expected `...\var\handoffs\var/handoffs\<sid>\latest.md` while the session wrote `...\var\handoffs\<sid>\latest.md`. COMPLETE was never seen, no clear, idle at ~270k with the force limit at 300k.
+- The root never sits inside `<x>/var/handoffs`: `normalizeRoot` in `hooks/handoff.ts` cuts any captured or stored root back to `<x>` (any depth, both separators, any case). A first capture also prefers the tree root, the nearest ancestor holding `var/handoffs` or `.git` (`findTreeRoot`, probed through `$.fs.exists`).
+- A clear that changes the id now hands the old id's root to the new id even when the new id already captured a drifted one (before, an existing root won).
+- A bad root already stored in memory is healed on every read, so a live session recovers without a new session.
+- Defence in depth: when the expected `latest.md` is missing or older than the order, `<treeRoot>/var/handoffs/<sid>/latest.md` is accepted if its header names the session and its last line is COMPLETE. One log line: `handoff: expected <path> is <reason>; accepting the complete <path> (session <id8>) from the tree root`. The clear, `resumed.json` and the resume order then use that file.
+- Tests: `tests/root-drift.test.ts`. Version bumped everywhere (HOOK_ID `0.5.15`).
+
 ## 0.5.14 - 2026-10-20
 
 - Order delivery no longer rests on `$.prompt.submit` alone. Session 21687c6d (Meta, 2026-10-20 12:07Z to 12:25Z) got four HANDOFF NOW orders logged and never saw one: no queue enqueue after any of them, no error, no log line. The order was queued with `void work()` and the submit result was never read.
