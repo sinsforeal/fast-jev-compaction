@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
-import { handoffStep, pendingOrders, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
+import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -55,7 +55,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.14/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.15/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -499,21 +499,44 @@ type CwdHost = { session: { cwd: () => Promise<string> } };
 type HandoffRoots = {
   /** `now` is the session cwd read by the caller this turn; `warn` logs the one drift line. */
   resolve: (now: string | undefined, sid: string, path: string, warn: (text: string) => Promise<void>) => Promise<string>;
-  /** After a clear changed the id: the new id inherits the old id's root unless it already has one. */
+  /**
+   * After a clear changed the id: the new id takes the old id's root, even if it already captured a
+   * (drifted) one at its own first event (0.5.15; before, an existing root won).
+   */
   seed: (from: string, to: string) => void;
+  /** 0.5.15: the stored root of a session, normalised, or undefined. */
+  rootOf: (sid: string) => string | undefined;
+  /** 0.5.15: lets a first capture look for the tree root (nearest ancestor with var/handoffs or .git). */
+  useProbe: (exists: (path: string) => Promise<boolean>) => void;
 };
-function createHandoffRoots(): HandoffRoots {
-  const roots = new Map<string, string>();
+function createHandoffRoots(initial: Iterable<[string, string]> = []): HandoffRoots {
+  const roots = new Map<string, string>(initial);
   const warned = new Set<string>();
+  let probe: ((path: string) => Promise<boolean>) | undefined;
+  /** 0.5.15: heals a stored root that sits inside var/handoffs (the 15635d41 incident) on every read. */
+  const stored = (sid: string): string | undefined => {
+    const raw = roots.get(sid);
+    if (raw === undefined) return undefined;
+    const healed = normalizeRoot(raw);
+    if (healed !== raw) roots.set(sid, healed);
+    return healed;
+  };
   return {
     seed(from, to) {
-      const root = roots.get(from);
-      if (root !== undefined && !roots.has(to)) roots.set(to, root);
+      const root = stored(from);
+      if (root !== undefined) roots.set(to, root);
     },
+    rootOf: stored,
+    useProbe(exists) { probe = exists; },
     async resolve(now, sid, path, warn) {
-      const captured = roots.get(sid);
-      if (captured === undefined) { if (now !== undefined) roots.set(sid, now); return resolveAgainstCwd(now, path); }
-      if (now !== undefined && now !== captured && !warned.has(sid)) {
+      const captured = stored(sid);
+      if (captured === undefined) {
+        if (now === undefined) return resolveAgainstCwd(now, path);
+        const root = probe ? await findTreeRoot(now, probe) : normalizeRoot(now);
+        roots.set(sid, root);
+        return resolveAgainstCwd(root, path);
+      }
+      if (now !== undefined && normalizeRoot(now) !== captured && !warned.has(sid)) {
         warned.add(sid);
         await warn(`handoff root stays at the captured cwd ${captured} (session cwd is now ${now})`);
       }
@@ -744,6 +767,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   try {
     (on as unknown as DeliveryOn)('session.append', async ($, event, next) => {
       await loadedReceipt($ as unknown as LogHost, loadedSessions);
+      handoffRoots.useProbe(path => ($ as unknown as { fs: { exists: (p: string) => Promise<boolean> } }).fs.exists(path));
       let sid = '';
       try { sid = await $.session.id(); } catch { /* legacy host */ }
       const ledger = ledgerFor(sid);
@@ -806,6 +830,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const ledger = ledgerFor(sid);
     // First event of a session id may be this one: capture the handoff root now (launch cwd).
     try {
+      handoffRoots.useProbe(path => $.fs.exists(path));
       if (sid) await handoffRoots.resolve(await resolvedCwd($), sid, '.', text => log($, text));
     } catch { /* capture only */ }
     let prepared: SessionCompaction;
@@ -1029,6 +1054,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const justForced = sid ? forcedThisTurn.delete(sid) : false;
     if (configured.handoffDir && sid && event.isAborted !== true) {
       try {
+        handoffRoots.useProbe(path => $.fs.exists(path));
         const cwdNow = await resolvedCwd($);
         const win = await windowFor($ as unknown as WindowHost, configured, handoffRoots, sid, cwdNow, windows);
         await handoffStep($ as unknown as HandoffHost, {
@@ -1039,6 +1065,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
           onIdChanged: (previous, id) => handoffRoots.seed(previous, id),
+          treeRoot: handoffRoots.rootOf(sid),
           transcriptPathFor: async id => {
             const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
             const cwd = await resolvedCwd($);
@@ -1051,4 +1078,4 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 };
 
-export { resolveOptions };
+export { resolveOptions, createHandoffRoots };
