@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },

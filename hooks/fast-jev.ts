@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
-import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
+import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -55,7 +55,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.15/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.16/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -790,6 +790,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
     if (sid) { warmSubmit(idleWarm, sid); }
+    // 0.5.16: a typed or bridge prompt is a person; it lifts the host guard that refused the plugin's clear.
+    const originKind = (event.origin as { kind?: string } | undefined)?.kind;
+    if (sid && (originKind === 'composer' || originKind === 'bridge')) {
+      try {
+        if (await resetClearFailures($ as unknown as HandoffHost, sid)) await log($, 'handoff clear failures reset by a person prompt');
+      } catch { /* a store error never blocks the prompt */ }
+    }
     const ledger = ledgerFor(sid);
     let snapshot: SessionMessage[] = [];
     try { snapshot = await $.session.messages(); } catch { /* Keep submission flowing. */ }

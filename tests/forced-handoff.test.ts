@@ -3,7 +3,7 @@ import { register, toSessionMessages } from '../hooks/fast-jev.ts';
 import { applyDecisions, decideCall, messageChars } from '../src/compact.js';
 import { collectToolCalls } from '../src/state.js';
 import { collectPins, pinStoreKey, readPinProvenance, readPinRecord } from '../hooks/pin-provenance.js';
-import { MAX_CLEAR_FAILURES, MAX_FORCED_REPEATS } from '../hooks/handoff.ts';
+import { CLEAR_RETRY_COOLDOWN_MS, MAX_CLEAR_FAILURES,MAX_FORCED_REPEATS } from '../hooks/handoff.ts';
 import type { Message } from '../src/types.js';
 
 const m = (role: Message['role'], text: string, extra = {}): Message => ({ role, text, toolUses: [], ...extra });
@@ -95,6 +95,7 @@ function harness(flag: '1' | 'unset' | 'unreadable' | 'other' = '1', options = {
   const latest = `${root}/latest.md`;
   const good = `# Handoff for session ${initialSid}\nbody\nCOMPLETE\n`;
   return { $, files, mtimes, kinds, store, logs, core, cut, turn, append, flush, put, root, latest, good, handlers, sid: initialSid,
+    advance: (ms: number) => { now += ms; },
     install, marker: () => JSON.parse(files.get(`${root}/order.json`)!),
     setRows: (value: Message[]) => { rows = value; }, getRows: () => rows,
     setTokens: (value: number | undefined) => { tokens = value; },
@@ -315,8 +316,48 @@ describe('registered forced handoff floor', () => {
     for (let i = 0; i < 8; i++) { await h.turn(); await h.flush(); }
     expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES);
     expect(h.$.prompt.submit).toHaveBeenCalledTimes(1);
-    expect(h.files.has(`${h.root}/order.json`)).toBe(false);
+    // 0.5.16: the marker survives the cap, the clear is still pending.
+    expect(h.files.has(`${h.root}/order.json`)).toBe(true);
     expect(h.core).not.toHaveBeenCalled();
+  });
+
+  it('0.5.16 logs the thrown error text in the clear failed line', async () => {
+    const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+    h.$.command.run.mockRejectedValue(new Error('the session was stopped and nobody has sent input since'));
+    await h.turn(); await h.flush();
+    const line = h.logs.find(entry => entry.includes('handoff clear failed (attempt 1 of 3)'));
+    expect(line).toContain('the session was stopped and nobody has sent input since');
+  });
+
+  it('0.5.16 retries after the cooldown once the burst is spent, and then clears', async () => {
+    const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+    h.$.command.run.mockRejectedValue(new Error('clear refused'));
+    for (let i = 0; i < 5; i++) { await h.turn(); await h.flush(); }
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES);
+    h.advance(CLEAR_RETRY_COOLDOWN_MS - 1000);
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES);
+    h.advance(2000);
+    h.$.command.run.mockResolvedValue({});
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES + 1);
+    expect(h.files.has(`${h.root}/order.json`)).toBe(false);
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);
+  });
+
+  it('0.5.16 a person prompt resets the failure count, a peer prompt does not', async () => {
+    const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+    h.$.command.run.mockRejectedValue(new Error('clear refused'));
+    for (let i = 0; i < 4; i++) { await h.turn(); await h.flush(); }
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES);
+    const next = async (e: any) => ({ text: e.text });
+    await h.handlers['prompt.submit'](h.$, { text: 'x', wait: false, origin: { kind: 'peer' } }, next);
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES);
+    await h.handlers['prompt.submit'](h.$, { text: 'hello', wait: false, origin: { kind: 'composer' } }, next);
+    expect(h.logs.some(line => line.includes('reset by a person prompt'))).toBe(true);
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES + 1);
   });
 });
 
@@ -374,7 +415,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.15/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.16/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

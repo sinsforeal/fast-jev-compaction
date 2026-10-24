@@ -52,6 +52,8 @@ export type HandoffState = {
   soonOrders?: number;
   /** Clear or resume attempts that failed; capped. */
   clearFailures: number;
+  /** 0.5.16: clock.now of the latest failed clear; after MAX_CLEAR_FAILURES a new burst starts once the cooldown has passed. */
+  lastClearFailAt?: number;
   /** The clear is not available on this host (logged once). */
   clearBlocked?: boolean;
   /** A ratio miss forces NOW independently of context size and launcher ENV. */
@@ -61,6 +63,8 @@ export type HandoffState = {
 export const SOON_STEP_TOKENS = 50_000;
 export const MAX_FORCED_REPEATS = 3;
 export const MAX_CLEAR_FAILURES = 3;
+/** 0.5.16: after a burst of failed clears, the next burst waits this long; retries never stop for good. */
+export const CLEAR_RETRY_COOLDOWN_MS = 10 * 60_000;
 /** Delay before a detached host call, so its hook has returned first. */
 export const DETACH_DELAY_MS = 250;
 // Only live work is in memory. A module reload cannot strand a persisted in-flight flag.
@@ -260,6 +264,16 @@ async function save(host: HandoffHost, sessionId: string, state: HandoffState): 
   await host.store.set(stateKey(sessionId), state);
 }
 
+/** 0.5.16: a person's prompt lifts a host guard on plugin-origin input, so the failure count starts over. */
+export async function resetClearFailures(host: HandoffHost, sessionId: string): Promise<boolean> {
+  const state = await load(host, sessionId);
+  if (state.clearFailures === 0) return false;
+  state.clearFailures = 0;
+  delete state.lastClearFailAt;
+  await save(host, sessionId, state);
+  return true;
+}
+
 /** Waits before a detached call; a host without a clock sleep just goes on. */
 async function pause(host: HandoffHost): Promise<void> {
   try { await host.clock.sleep(DETACH_DELAY_MS); } catch { /* no sleep: go on */ }
@@ -364,6 +378,12 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
     });
   };
 
+  // 0.5.16: a spent burst of failed clears is retried after the cooldown, forever.
+  if (state.clearFailures >= MAX_CLEAR_FAILURES && state.lastClearFailAt !== undefined
+      && await host.clock.now() - state.lastClearFailAt >= CLEAR_RETRY_COOLDOWN_MS) {
+    state.clearFailures = 0;
+    await save(host, sessionId, state);
+  }
   // 1. An order is out: is the file complete and newer than it?
   if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
     const check = await checkAny(state.orderAt);
@@ -414,12 +434,14 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           } catch { await log('handoff: could not read the session color from the transcript; carrying on without it'); }
           try {
             await host.command.run({ command: 'clear' });
-          } catch {
+          } catch (error) {
             const again = await load(host, sessionId);
             again.clearFailures += 1;
+            again.lastClearFailAt = await host.clock.now();
             await save(host, sessionId, again);
-            await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}); ${again.clearFailures < MAX_CLEAR_FAILURES ? 'will retry on the next turn' : 'context retained, retry limit reached'}`);
-            if (again.clearFailures >= MAX_CLEAR_FAILURES) await clearOrderMarker(host, dir, sessionId, log);
+            const reason = String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 200);
+            await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}): ${reason}; ${again.clearFailures < MAX_CLEAR_FAILURES ? 'will retry on the next turn' : 'context retained, retrying after a 10 minute cooldown'}`);
+            // The order marker stays: the clear is still pending.
             return;
           }
           const newId = await followSessionId(host, activeDir, sessionId, latest, log, ctx.onIdChanged);

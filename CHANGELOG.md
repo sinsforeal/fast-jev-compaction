@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.16 - 2026-10-23
+
+- The plugin no longer gives up on the handoff clear for good. Meta session cc4dac21 (2026-10-23) had three `command.run('clear')` calls refused by the host, then `clearFailures` stayed at 3, step 1 of `handoffStep` was skipped on every later turn and the order marker was deleted. Only a restart ended it.
+- Up to 3 attempts per burst, as before. `lastClearFailAt` is recorded; once `CLEAR_RETRY_COOLDOWN_MS` (10 minutes) has passed, the next turn end starts a new burst, forever, until the clear works.
+- A prompt with origin `composer` or `bridge` (a person) resets the failure count (`resetClearFailures`). Peer, task and plugin prompts do not.
+- The `handoff clear failed (attempt n of 3)` log line now carries the thrown error text (first 200 characters).
+- The order marker is kept at the cap, so the pending clear stays visible.
+- Tests: `tests/forced-handoff.test.ts` (error text, cooldown retry, person reset, marker). Version bumped everywhere (HOOK_ID `0.5.16`).
+
 ## 0.5.15 - 2026-10-22
 
 - Handoff root drift fixed. Session 15635d41 (Mechanism_Analyst, 2026-10-22 05:37) captured `F:\REPS2\Mechanism_Analyst\var\handoffs` as its root, so the plugin expected `...\var\handoffs\var/handoffs\<sid>\latest.md` while the session wrote `...\var\handoffs\<sid>\latest.md`. COMPLETE was never seen, no clear, idle at ~270k with the force limit at 300k.
