@@ -177,11 +177,11 @@ The UI diagnostics themselves are not sent as model context. All receipts remain
 in `~/.claude/fast-jev-compaction.log`; log failures never alter the cut.
 
 The first registered callback per session writes a disk-only `module-loaded`
-receipt with `hook=fast-jev-compaction@0.5.16/forced-handoff-floor`, the full session
+receipt with `hook=fast-jev-compaction@0.5.17/forced-handoff-floor`, the full session
 id and `DISABLE_AUTO_COMPACT=1|unset|other|unreadable`. It never logs an arbitrary
 environment value or error. Registration alone writes nothing; callback reload
 may emit a new receipt for the same session. Require a fresh intended-session
-receipt after installing 0.5.16. Native scanner validation and an actual handoff
+receipt after installing 0.5.17. Native scanner validation and an actual handoff
 clear/resume are separate runtime checks, not proven by the unit suite.
 
 Text recognition is a heuristic based on known harness wrappers. Fenced examples

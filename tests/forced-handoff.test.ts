@@ -329,6 +329,25 @@ describe('registered forced handoff floor', () => {
     expect(line).toContain('the session was stopped and nobody has sent input since');
   });
 
+  it.runIf(process.platform === 'win32')('0.5.17 a stopped-session refusal is cleared through the console helper (registered wiring)', async () => {
+    const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+    h.$.command.run.mockRejectedValue(new Error('fast-jev-compaction: $.command.run: the session was stopped and nobody has sent input since'));
+    const idle = ['x', '\u2500'.repeat(40), '\u276f', '\u2500'.repeat(40), '  status'];
+    h.$.process.run.mockImplementation(async (argv: string[], init: any) => {
+      if (argv[0] !== 'powershell') return { exitCode: 1 };
+      expect(init.env.FJ_SID).toBe(h.sid);
+      if (argv.at(-1) === 'read') return { exitCode: 0, stdout: JSON.stringify({ pid: 31337, rows: idle }) };
+      h.setSid('typed-clear-session');
+      return { exitCode: 0, stdout: JSON.stringify({ pid: 31337, typed: 14 }) };
+    });
+    await h.turn();
+    for (let i = 0; i < 4; i++) await h.flush();
+    expect(h.logs.slice(-5).join(' | ')).toContain('handoff clear via console fallback (pid 31337)');
+    expect(h.logs.some(entry => entry.includes('handoff clear failed'))).toBe(false);
+    expect(h.files.has('F:\\h\\console-clear.ps1')).toBe(true);
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);
+  });
+
   it('0.5.16 retries after the cooldown once the burst is spent, and then clears', async () => {
     const h = harness('unset'); await force(h); h.put(h.latest, h.good);
     h.$.command.run.mockRejectedValue(new Error('clear refused'));
@@ -415,7 +434,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.16/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.17/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

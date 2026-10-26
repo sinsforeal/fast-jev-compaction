@@ -5,6 +5,7 @@
  */
 
 import { carryColor, resolveColor, type AgentColorRecord } from './color-carry.js';
+import { isStoppedRefusal, type ConsoleClearResult } from './console-clear.js';
 
 export type HandoffConfig = {
   handoffAt: number;
@@ -35,7 +36,7 @@ export type HandoffHost = {
     list: () => Promise<readonly { name: string }[]>;
   };
   /** 0.5.5: `$.process.run`, used only to rename and delete the order marker (`$.fs` has neither). */
-  process: { run: (argv: readonly string[], init?: { timeoutMs?: number }) => Promise<{ exitCode: number; stdout?: string }> };
+  process: { run: (argv: readonly string[], init?: { timeoutMs?: number; env?: Record<string, string> }) => Promise<{ exitCode: number; stdout?: string }> };
 };
 
 /** Per-session record under `handoff:<sessionId>` in `$.store`. */
@@ -252,7 +253,16 @@ export type StepContext = {
   treeRoot?: string;
   /** 0.5.9: the transcript file of a session id, for the color carry; absent or undefined = no carry. */
   transcriptPathFor?: (sessionId: string) => Promise<string | undefined>;
+  /**
+   * 0.5.17: Windows only. Types `/clear` + Enter into the session's own console when the host refuses the plugin's
+   * clear with the "session was stopped" family. Absent (other platforms, tests) = today's retry behaviour.
+   */
+  consoleClear?: (input: { sessionId: string; dir: string }) => Promise<ConsoleClearResult>;
 };
+
+/** 0.5.17: after typing `/clear`, how long the session id gets to change, and how often it is read. */
+export const CONSOLE_CONFIRM_MS = 30_000;
+export const CONSOLE_CONFIRM_POLL_MS = 500;
 
 async function load(host: HandoffHost, sessionId: string): Promise<HandoffState> {
   const raw = await host.store.get(stateKey(sessionId));
@@ -272,6 +282,16 @@ export async function resetClearFailures(host: HandoffHost, sessionId: string): 
   delete state.lastClearFailAt;
   await save(host, sessionId, state);
   return true;
+}
+
+/** 0.5.17: true once the session id differs from `sessionId`; false after CONSOLE_CONFIRM_MS or when the id cannot be read. */
+async function waitForNewId(host: HandoffHost, sessionId: string): Promise<boolean> {
+  const polls = Math.ceil(CONSOLE_CONFIRM_MS / CONSOLE_CONFIRM_POLL_MS);
+  for (let i = 0; i < polls; i++) {
+    try { if (await host.session.id() !== sessionId) return true; } catch { return false; }
+    try { await host.clock.sleep(CONSOLE_CONFIRM_POLL_MS); } catch { return false; }
+  }
+  return false;
 }
 
 /** Waits before a detached call; a host without a clock sleep just goes on. */
@@ -428,6 +448,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           // 0.5.9: the clear drops the `/color` record with the old transcript; read it first.
           // 0.5.13: walk the chain of previous sessions, then the color.json cache.
           let color: AgentColorRecord | undefined;
+          let consoleCleared = false;
           try {
             const pathFor = ctx.transcriptPathFor;
             if (pathFor) color = await resolveColor(host, dir, sessionId, pathFor, log);
@@ -435,14 +456,31 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           try {
             await host.command.run({ command: 'clear' });
           } catch (error) {
-            const again = await load(host, sessionId);
-            again.clearFailures += 1;
-            again.lastClearFailAt = await host.clock.now();
-            await save(host, sessionId, again);
             const reason = String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 200);
-            await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}): ${reason}; ${again.clearFailures < MAX_CLEAR_FAILURES ? 'will retry on the next turn' : 'context retained, retrying after a 10 minute cooldown'}`);
-            // The order marker stays: the clear is still pending.
-            return;
+            // 0.5.17: the host refuses a plugin command after a stop until a person types. Type /clear into the console.
+            let fallbackNote = '';
+            if (ctx.consoleClear && isStoppedRefusal(reason)) {
+              const typed = await ctx.consoleClear({ sessionId, dir });
+              if (typed.ok) {
+                if (await waitForNewId(host, sessionId)) {
+                  consoleCleared = true;
+                  await log(`handoff clear via console fallback (pid ${typed.pid})`);
+                } else {
+                  fallbackNote = `; console fallback typed /clear (pid ${typed.pid}) but the session id did not change within ${CONSOLE_CONFIRM_MS / 1000} s`;
+                }
+              } else {
+                fallbackNote = `; console fallback: ${typed.error}`;
+              }
+            }
+            if (!consoleCleared) {
+              const again = await load(host, sessionId);
+              again.clearFailures += 1;
+              again.lastClearFailAt = await host.clock.now();
+              await save(host, sessionId, again);
+              await log(`handoff clear failed (attempt ${again.clearFailures} of ${MAX_CLEAR_FAILURES}): ${reason}${fallbackNote}; ${again.clearFailures < MAX_CLEAR_FAILURES ? 'will retry on the next turn' : 'context retained, retrying after a 10 minute cooldown'}`);
+              // The order marker stays: the clear is still pending.
+              return;
+            }
           }
           const newId = await followSessionId(host, activeDir, sessionId, latest, log, ctx.onIdChanged);
           await clearOrderMarker(host, dir, sessionId, log);

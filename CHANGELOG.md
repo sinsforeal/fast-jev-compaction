@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.17 - 2026-10-26
+
+- Console fallback for a refused handoff clear. Pick Assist d1e9c530 (2026-10-26 12:08) had `$.command.run('clear')` refused twice with "the session was stopped and nobody has sent input since". The User only talks to Pick through channels (voice, phone), which do not count as typed input, so the 0.5.16 retries could never succeed.
+- When the clear fails with that refusal (`isStoppedRefusal`: "session was stopped/interrupted", "nobody has sent input"), the plugin types `/clear` + Enter into the session's own console (Windows only, `hooks/console-clear.ts`). Other clear errors and other platforms keep the 0.5.16 retry and cooldown path.
+- The console work is a PowerShell helper (`console-clear.ps1`, written next to the handoff files, started hidden through `$.process.run`): it finds the claude.exe pid from `~/.claude/sessions/<pid>.json` by session id, AttachConsole, reads the visible rows, and later writes the key records with WriteConsoleInputW. It runs as a child, so its FreeConsole/AttachConsole never touch the plugin's stdio.
+- It types only when `screenVerdict` says idle with an empty prompt box: no "esc to interrupt" on screen, a prompt row framed by rules, nothing after the marker. The helper re-checks the same rules just before writing. A busy session, typed text or a dialog waits for the next turn's retry (counts as one failed attempt, reason in the log line).
+- After typing, the session id is polled for up to 30 s. Changed: one log line `handoff clear via console fallback (pid N)`, then the normal path (copy files, resume order). Unchanged or any helper error: the `handoff clear failed` line carries `; console fallback: <text>` and the usual retry/cooldown applies.
+- Tests: `tests/console-clear.test.ts` (refusal match, idle/empty-prompt fixtures from live screens, helper call order with mocked `process.run`, fallback wiring, other errors never use the console), one registered-wiring test in `tests/forced-handoff.test.ts`. Version bumped everywhere (HOOK_ID `0.5.17`).
+
 ## 0.5.16 - 2026-10-23
 
 - The plugin no longer gives up on the handoff clear for good. Meta session cc4dac21 (2026-10-23) had three `command.run('clear')` calls refused by the host, then `clearFailures` stayed at 3, step 1 of `handoffStep` was skipped on every later turn and the order marker was deleted. Only a restart ended it.
