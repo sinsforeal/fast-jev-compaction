@@ -11,6 +11,7 @@ import type {
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
 import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
+import { consoleClear, onWindows } from './console-clear.js';
 import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
@@ -55,7 +56,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.16/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.17/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -1072,6 +1073,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
           onIdChanged: (previous, id) => handoffRoots.seed(previous, id),
+          // 0.5.17: Windows only; a clear the host refuses after a stop is typed into the session's own console.
+          consoleClear: onWindows() ? input => consoleClear($, input) : undefined,
           treeRoot: handoffRoots.rootOf(sid),
           transcriptPathFor: async id => {
             const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
