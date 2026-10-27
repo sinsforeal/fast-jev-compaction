@@ -1,8 +1,8 @@
 # Jev warm timer reset, notebook 10-27
 
-Stage: WIP commit at call limit (13:00). hooks/idle-warm.ts DONE (noteActivity, warmTouch, warmEpoch, warmSubmit, warmIdle(epoch), fireWarm(state): sid drop, live-id check, real-idle check with remainder re-arm).
+Stage: ALL DONE 10-27 12:55 (items 1-4 below complete, tsc and typecheck:hooks clean, full suite 22 files 364 passed). Left for the orchestrator: tag, land, install. Version strings not bumped (CHANGELOG has the 0.5.18 entry only).
 
-NOT done, in order:
+Original to-do (done):
 1. hooks/fast-jev.ts wiring: import warmTouch, warmEpoch. In the session.append handler (~line 769) add `if (sid && event.agentId === undefined) warmTouch(idleWarm, sid)`. In turn.complete (~1017) and the dropped-submit path (~817) read `const epoch = warmEpoch(idleWarm, sid)` before armIdleWarm and pass it as a new last param through to warmIdle.
 2. tests/idle-warm.test.ts and tests/tree-warm.test.ts: fire() must move Date now (vi.useFakeTimers({ toFake: ['Date'] }) in beforeEach, harness records Date.now() inside clock.after, fire() does vi.setSystemTime(armedAt + ms)), because a ping needs a full interval of real idle; tests that fire at once would otherwise re-arm instead of fork. New tests: turn resets the timer (complete, +30 min, submit+complete: first timer cancelled, new live), clear resets (sid change drops old timer; an old timer fired after the id change does not fork), no ping before idleWarmMinutes of real idle (append at +40 min, fire at +50 re-arms ~10 min, no fork), ping after (advance, fork called), epoch race (submit between turn.complete and its arm).
 3. `npx tsc --noEmit`, `npm run typecheck:hooks`, vitest on idle-warm, tree-warm, host-loader-contract, then the full suite once.

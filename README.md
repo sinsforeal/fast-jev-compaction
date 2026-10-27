@@ -178,7 +178,8 @@ different window per tree, put `window.json` in the resolved `handoffDir` (defau
 
 Off by default. The main conversation's prompt cache lives one hour on a subscription; a longer gap makes the next turn rewrite the whole context at the write price. With `idleWarmMinutes` > 0 (pick under the lifetime, e.g. 50):
 
-- After each main-thread `turn.complete` one `$.clock.after` timer is armed per session. A new `prompt.submit` or `turn.complete` cancels and re-arms it.
+- After each main-thread `turn.complete` one `$.clock.after` timer is armed per session. A new `prompt.submit`, `turn.complete` or main-thread `session.append` (a delivery-started turn, a tool result) resets the idle clock; the first two cancel and re-arm the timer, an append makes an early timer re-arm for the remainder.
+- A new session id (a clear or handoff) drops every timer of the old id, and a timer that fires under an id that is no longer the live one sends nothing. A ping goes out only after a full `idleWarmMinutes` with no activity; the warm's own pings do not count as activity.
 - When it fires and no turn is running, one `$.model.fork({ prompt: "Reply with the single word ok." })` is sent. The fork runs over the session's own transcript and shares the main prefix (docs: "a fork ... inherits the parent's system prompt, tools, and conversation history exactly, so its first request reads the parent's cache"), and a cache hit resets the TTL. Then it re-arms, at most `idleWarmMax` times per gap.
 - It never submits a prompt, never warms during a turn, and a failing or null fork is logged once and stops warming for that gap.
 - Log line per warm in `~/.claude/fast-jev-compaction.log`: `[sid8] idle warm <n> after <m> min: cache_read <r>, cache_write <w>, out <o>`. A first warm with `cache_read` near the context size and a small `cache_write` is the proof that the main prefix was read.
