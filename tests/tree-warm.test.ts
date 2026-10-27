@@ -1,12 +1,17 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { register } from '../hooks/fast-jev.ts';
 
 /** 0.5.12: `<handoffDir>/window.json` may carry idleWarmMinutes / idleWarmMax, read at each arm. */
 const SID = 'treewarm0123456789';
 const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
-type Timer = { ms: number; fn: () => void; cancelled: boolean };
+/** armedAt = faked Date.now() at arm time: a ping needs a full interval of real idle (0.5.18). */
+type Timer = { ms: number; fn: () => void; cancelled: boolean; armedAt: number };
+
+afterEach(() => { vi.useRealTimers(); });
 
 function harness(options: Record<string, unknown> = {}) {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-27T10:00:00Z'));
   let now = 1000;
   const files = new Map<string, string>();
   const mtimes = new Map<string, number>();
@@ -32,7 +37,7 @@ function harness(options: Record<string, unknown> = {}) {
     store: { get: async () => undefined, set: async () => {}, delete: async () => {} },
     clock: {
       now: async () => now, sleep: async () => {},
-      after: (ms: number, fn: () => void) => { const t: Timer = { ms, fn, cancelled: false }; timers.push(t); return { cancel: () => { t.cancelled = true; } }; },
+      after: (ms: number, fn: () => void) => { const t: Timer = { ms, fn, cancelled: false, armedAt: Date.now() }; timers.push(t); return { cancel: () => { t.cancelled = true; } }; },
     },
     model: { fork },
     http: { fetch: vi.fn() },
@@ -47,7 +52,7 @@ function harness(options: Record<string, unknown> = {}) {
   const complete = async () => { await handlers['turn.complete']!($, {}, async (e: unknown) => e); };
   const submit = async () => handlers['prompt.submit']!($, { text: 'hi', turnId: 't' }, async () => ({ text: 'hi' }));
   const drop = async () => handlers['prompt.submit']!($, { text: 'hi', turnId: 't' }, async () => ({ drop: 'fixture' }));
-  const fire = async (t: Timer) => { t.fn(); t.cancelled = true; await flush(); };
+  const fire = async (t: Timer) => { vi.setSystemTime(Math.max(Date.now(), t.armedAt + t.ms)); t.fn(); t.cancelled = true; await flush(); };
   const lines = (needle: string) => diskLog().split('\n').filter(l => l.includes(needle));
   return { put, win, live, timers, fork, complete, submit, drop, fire, diskLog, lines, files };
 }

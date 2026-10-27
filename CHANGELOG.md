@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.18 - 2026-10-27
+
+- Idle warm timer fixed. The 10-24 log showed two interleaved chains per session tag: the real one (resets at the next turn) and a second one (n=4..9 over hours of turns) whose cache_read grew with the live context. That second chain was a Gap armed under an id that no longer receives events (pre-clear or pre-handoff), whose timer survived and pinged the current conversation until `idleWarmMax`. The `[sid]` tag on the log line is the live id at fire time, which hid it.
+- A new session id drops every Gap and timer of the old id (`noteActivity` in `hooks/idle-warm.ts`). A timer that fires under an id that is no longer the live one (checked against both the state and `$.session.id()`) drops its Gap and sends nothing.
+- A ping needs a full `idleWarmMinutes` of real idle. The state keeps `lastActive`, set by `prompt.submit`, the turn end and every main-thread `session.append` (`warmTouch`); a child's append and the warm's own turn do not count. A timer that fires early re-arms for the remainder instead of pinging. This also covers a turn started by a delivery (channel message, task notification) with no `prompt.submit`, and a turn longer than the interval.
+- A `turn.complete` or dropped submission reads `warmEpoch` before its window lookups and passes it to `warmIdle`; a prompt submitted in between wins the next arm, so no timer is armed for a turn that is already running.
+- Tests: `tests/idle-warm.test.ts` 13 to 22 (turn resets, lost-cancel re-arm, append resets, child append ignored, no ping before the interval, ping not counted as activity, clear drops old timers, old-id timer after the id change, epoch race). The idle-warm and tree-warm harnesses fake `Date` so timers see the elapsed time.
+
 ## 0.5.17 - 2026-10-26
 
 - Console fallback for a refused handoff clear. Pick Assist d1e9c530 (2026-10-26 12:08) had `$.command.run('clear')` refused twice with "the session was stopped and nobody has sent input since". The User only talks to Pick through channels (voice, phone), which do not count as typed input, so the 0.5.16 retries could never succeed.

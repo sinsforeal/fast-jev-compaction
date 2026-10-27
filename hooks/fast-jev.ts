@@ -12,7 +12,7 @@ import { applyDecisions, compact, decideCall, fitTarget, messageChars, reduction
 import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { consoleClear, onWindows } from './console-clear.js';
-import { createWarmState, warmIdle, warmSubmit, type WarmHost, type WarmState } from './idle-warm.js';
+import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -56,7 +56,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.17/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.18/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -682,11 +682,12 @@ async function windowFor($: WindowHost, configured: HookConfig, roots: HandoffRo
 }
 
 /** Arms (or clears) the idle warm for a session with the per-tree config in force right now. Never throws. */
-async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roots: HandoffRoots, sid: string, state: WindowState, warm: WarmState): Promise<void> {
+async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roots: HandoffRoots, sid: string, state: WindowState, warm: WarmState, epoch?: number): Promise<void> {
   try {
     const cwd = await resolvedCwd($);
     const win = await windowFor($, configured, roots, sid, cwd, state);
-    warmIdle($, warm, sid, win.idleWarmMinutes, win.idleWarmMax);
+    // 0.5.18: `epoch` was read before the awaits above; a prompt that came meanwhile owns the next arm.
+    warmIdle($, warm, sid, win.idleWarmMinutes, win.idleWarmMax, epoch);
   } catch { /* the warm never blocks a turn */ }
 }
 
@@ -771,6 +772,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       handoffRoots.useProbe(path => ($ as unknown as { fs: { exists: (p: string) => Promise<boolean> } }).fs.exists(path));
       let sid = '';
       try { sid = await $.session.id(); } catch { /* legacy host */ }
+      // 0.5.18: a main-thread append is activity; it resets the idle warm clock (a child's append is not).
+      if (sid && event.agentId === undefined) warmTouch(idleWarm, sid);
       const ledger = ledgerFor(sid);
       // All doors supply UUID chronology; only deliveries become pinned rows.
       // $.session.messages is main-only: never use it to place a child's row.
@@ -814,7 +817,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     }
     const result = await next(event);
     // A dropped submission runs no turn, so no turn.complete would re-arm the warm.
-    if (sid && result.drop !== undefined) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, sid, windows, idleWarm);
+    if (sid && result.drop !== undefined) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, sid, windows, idleWarm, warmEpoch(idleWarm, sid));
     if (result.drop === undefined) {
       ledger.prompt(result.text, result.context ?? [], !!event.attachments?.length, snapshot, position, result.origin ?? event.origin);
     }
@@ -1014,7 +1017,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
     if (event.agentId === undefined) {
       try {
         const warmSid = await $.session.id();
-        if (warmSid) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, warmSid, windows, idleWarm);
+        if (warmSid) {
+          const epoch = warmEpoch(idleWarm, warmSid); // before the arm's awaits: a prompt in between wins
+          await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, warmSid, windows, idleWarm, epoch);
+        }
       } catch { /* the warm never blocks a turn */ }
     }
     if (compacting || event.agentId !== undefined) return next(event);
