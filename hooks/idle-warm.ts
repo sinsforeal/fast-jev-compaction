@@ -1,6 +1,8 @@
 /**
  * 0.5.11: idle cache warm. Off unless the effective `idleWarmMinutes` > 0.
  * 0.5.12: the interval and cap are the per-tree values (window.json over the options), taken at each arm.
+ * 0.5.18: the idle clock resets on every prompt, turn end and main-thread append; a new session id (clear)
+ * drops every timer of the old id; a ping needs a full interval of real idle and the live id to match.
  *
  * The main conversation runs a one-hour prompt cache. A gap past it makes the next turn
  * rewrite the whole context at the write price. After each main-thread turn.complete this
@@ -35,18 +37,25 @@ export type WarmHost = {
 
 type Cancel = { cancel: () => void };
 /** minutes/max are the per-tree values taken when the gap was armed (0.5.12). */
-type Gap = { timer?: Cancel; count: number; running: boolean; warming: boolean; minutes: number; max: number };
+type Gap = { sid: string; timer?: Cancel; count: number; running: boolean; warming: boolean; minutes: number; max: number; epoch: number };
 
 export type WarmState = {
   gaps: Map<string, Gap>;
+  /** 0.5.18: the live main-thread session id, from the latest activity. A Gap under any other id is dead. */
+  sid?: string;
+  /** 0.5.18: Date.now() of the latest real main-thread activity (prompt, turn end, append). Warm pings do not count. */
+  lastActive: number;
 };
+
+/** A timer may fire a little early; real idle within this much of the interval counts as the interval. */
+const IDLE_SLACK_MS = 5_000;
 
 /** Smallest prompt that still gets a reply. Fork has no maxTokens knob, so the text is the cap. */
 export const WARM_PROMPT = 'Reply with the single word ok.';
 
 /** 0.5.12: no global on/off. The interval and cap come from the effective per-tree config at each arm. */
 export function createWarmState(): WarmState {
-  return { gaps: new Map() };
+  return { gaps: new Map(), lastActive: 0 };
 }
 
 const LOG_FILE = '.claude/fast-jev-compaction.log';
@@ -70,7 +79,7 @@ async function warmLog($: WarmHost, text: string): Promise<void> {
 
 function gapFor(state: WarmState, sid: string): Gap {
   let gap = state.gaps.get(sid);
-  if (!gap) { gap = { count: 0, running: false, warming: false, minutes: 0, max: 0 }; state.gaps.set(sid, gap); }
+  if (!gap) { gap = { sid, count: 0, running: false, warming: false, minutes: 0, max: 0, epoch: 0 }; state.gaps.set(sid, gap); }
   return gap;
 }
 
@@ -80,22 +89,41 @@ function cancelTimer(gap: Gap): void {
   try { timer?.cancel(); } catch { /* a timer that cannot be cancelled is skipped when it fires */ }
 }
 
-function armWarm($: WarmHost, gap: Gap): void {
+function armWarm($: WarmHost, state: WarmState, gap: Gap, ms: number = gap.minutes * 60_000): void {
   cancelTimer(gap);
   try {
     const mine: { handle?: Cancel } = {};
-    const handle = $.clock.after(gap.minutes * 60_000, () => {
-      void fireWarm($, gap, mine).catch(() => { /* never throws out of the timer */ });
+    const handle = $.clock.after(ms, () => {
+      void fireWarm($, state, gap, mine).catch(() => { /* never throws out of the timer */ });
     });
     mine.handle = handle;
     gap.timer = handle;
   } catch { /* no clock: no warm */ }
 }
 
-async function fireWarm($: WarmHost, gap: Gap, mine: { handle?: Cancel }): Promise<void> {
+/** Drops a Gap whose session is gone: no timer, no entry. */
+function dropGap(state: WarmState, gap: Gap): void {
+  cancelTimer(gap);
+  if (state.gaps.get(gap.sid) === gap) state.gaps.delete(gap.sid);
+}
+
+async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?: Cancel }): Promise<void> {
   if (gap.timer === undefined || gap.timer !== mine.handle) return; // cancelled or replaced
   gap.timer = undefined;
   if (gap.running || gap.warming) return; // a turn runs: its turn.complete re-arms
+  // 0.5.18: a Gap armed under an id that is no longer the live session (a clear changed it) never pings.
+  // The fork goes to the live conversation, so an old Gap would warm it with no idle behind the ping.
+  if (state.sid !== undefined && state.sid !== gap.sid) { dropGap(state, gap); return; }
+  try {
+    const live = await $.session.id();
+    if (typeof live === 'string' && live.length > 0 && live !== gap.sid) { dropGap(state, gap); return; }
+  } catch { /* an unreadable id does not decide */ }
+  if (gap.running || gap.warming || gap.timer !== undefined) return; // a turn or a new arm came during the id read
+  // 0.5.18: ping only after the interval of real idle. Activity that never reached prompt.submit or
+  // turn.complete (a delivery-started turn, tool results) moved lastActive; wait out the remainder.
+  const need = gap.minutes * 60_000;
+  const idle = Date.now() - state.lastActive;
+  if (idle < need - IDLE_SLACK_MS) { armWarm($, state, gap, Math.max(1_000, need - idle)); return; }
   gap.warming = true;
   const n = gap.count + 1;
   const after = n * gap.minutes;
@@ -109,7 +137,7 @@ async function fireWarm($: WarmHost, gap: Gap, mine: { handle?: Cancel }): Promi
     }
     const u = result.usage;
     await warmLog($, `idle warm ${n} after ${after} min: cache_read ${u.cache_read_input_tokens}, cache_write ${u.cache_creation_input_tokens}, out ${u.output_tokens}`);
-    if (n < gap.max) armWarm($, gap);
+    if (n < gap.max) armWarm($, state, gap);
   } catch {
     gap.count = n;
     try { await warmLog($, `idle warm ${n} failed after ${after} min: fork threw; warming stops for this gap`); } catch { /* swallowed */ }
@@ -118,28 +146,62 @@ async function fireWarm($: WarmHost, gap: Gap, mine: { handle?: Cancel }): Promi
   }
 }
 
+/**
+ * 0.5.18: real activity on the live main session. A different id than the last one means the session
+ * was cleared or replaced: every Gap of the old id is dead and loses its timer here, so an old timer
+ * can never fire into the new conversation. `real: false` (a warm is in flight) leaves lastActive alone.
+ */
+function noteActivity(state: WarmState, sid: string, real: boolean): void {
+  if (state.sid !== undefined && state.sid !== sid) {
+    for (const gap of [...state.gaps.values()]) if (gap.sid !== sid) dropGap(state, gap);
+  }
+  state.sid = sid;
+  if (real) state.lastActive = Date.now();
+}
+
+/** Main-thread activity that is neither a prompt nor a turn end (an append). Resets the idle clock. */
+export function warmTouch(state: WarmState, sid: string): void {
+  try {
+    if (!sid) return;
+    const gap = state.gaps.get(sid);
+    noteActivity(state, sid, !(gap?.warming && !gap.running));
+  } catch { /* never throws */ }
+}
+
+/** The epoch of the session's gap: warmSubmit moves it. Read before an await, hand to warmIdle. */
+export function warmEpoch(state: WarmState, sid: string): number {
+  try { return gapFor(state, sid).epoch; } catch { return 0; }
+}
+
 /** A prompt was submitted: a turn is about to run. Cancels the timer and starts a new gap. */
 export function warmSubmit(state: WarmState, sid: string): void {
   try {
+    noteActivity(state, sid, true);
     const gap = gapFor(state, sid);
     gap.running = true;
     gap.count = 0;
+    gap.epoch += 1;
     cancelTimer(gap);
   } catch { /* never throws */ }
 }
 
-/** A main-thread turn finished (or a submission was dropped): the idle gap starts now. */
-export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: number, max: number): void {
+/**
+ * A main-thread turn finished (or a submission was dropped): the idle gap starts now.
+ * `epoch` is warmEpoch() read before the caller's awaits; a prompt submitted since then owns the next arm.
+ */
+export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: number, max: number, epoch?: number): void {
   try {
     const gap = gapFor(state, sid);
     // During a warm, a turn.complete with no prompt before it is the fork's own: ignore it.
     if (gap.warming && !gap.running) return;
+    if (epoch !== undefined && gap.epoch !== epoch) return; // a prompt came in while the caller waited
+    noteActivity(state, sid, true);
     gap.running = false;
     gap.count = 0;
     gap.minutes = minutes;
     gap.max = max;
     // 0 = off for this tree (also when the option is on): no timer.
     if (!(minutes > 0)) { cancelTimer(gap); return; }
-    armWarm($, gap);
+    armWarm($, state, gap);
   } catch { /* never throws */ }
 }
