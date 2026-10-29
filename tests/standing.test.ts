@@ -152,6 +152,8 @@ describe('standing: the format and the User-quiet rule', () => {
     expect(isUserPrompt({ kind: 'scheduled-trigger' }, 'x')).toBe(false);
     expect(isUserPrompt({ kind: 'plugin', name: 'fast-jev-compaction' }, 'x')).toBe(false);
     expect(isUserPrompt(undefined, 'x')).toBe(false);
+    // 0.5.21: the restart tool's typed first prompt is not the User (10-29: it held two standing clears 60 min).
+    expect(isUserPrompt({ kind: 'composer' }, 'Window restarted by Ryan v2 at 17:10; resume from the HANDOFF RESUME order')).toBe(false);
   });
 });
 

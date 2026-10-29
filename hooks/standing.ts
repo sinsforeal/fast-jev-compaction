@@ -99,8 +99,12 @@ const FEED_WRAP = /^\s*<channel\s+source="(?:feed|pick-assist)"/i;
  * feed / pick-assist channel records. Peer channel, heartbeat, task notification, schedule, SDK and the plugin's
  * own prompts are not. A channel the engine could not attest arrives `unclassified`; its wrapper text decides.
  */
+/** The first-turn prompt meta's restart_windows.py types into a relaunched window; it is not the User (0.5.21). */
+const RESTART_PROMPT = /^\s*Window restarted by Ryan v2\b/;
+
 export function isUserPrompt(origin: unknown, text: string | undefined): boolean {
   const kind = (origin as { kind?: unknown } | undefined)?.kind;
+  if (RESTART_PROMPT.test(text ?? '')) return false;
   if (kind === 'composer' || kind === 'bridge') return true;
   if (kind === 'channel') {
     const server = String((origin as { server?: unknown }).server ?? '');
