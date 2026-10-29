@@ -306,7 +306,7 @@ describe('standing: the fresh start', () => {
     expect(h.log()).toContain(`standing: CLEARED ${SID.slice(0, 8)} -> ${NEW.slice(0, 8)}`);
     // the next prompt, of any origin
     await h.submit({ kind: 'peer' }, 'wake up');
-    expect(h.seen.at(-1).context).toEqual([`STANDING RESUME: read ${h.standingPath()} first, then answer the prompt.`]);
+    expect(h.seen.at(-1).context).toEqual([`STANDING RESUME: this is a handover. Read ${h.standingPath()} first, then do every after-handover step your CLAUDE.md names (required reading included), then answer the prompt.`]);
     expect(h.log()).toContain('standing: resume line carried as context');
     await h.submit({ kind: 'composer' }, 'second');
     expect(h.seen.at(-1).context).toBeUndefined();
@@ -326,7 +326,7 @@ describe('standing: the fresh start', () => {
     expect(dropped.drop).toBe('x');
     let got: any;
     await handlers['prompt.submit']!(h.$, { text: 'b', wait: false, origin: { kind: 'composer' } }, async (e: any) => { got = e; return { text: e.text }; });
-    expect(got.context).toEqual([expect.stringContaining('STANDING RESUME: read')]);
+    expect(got.context).toEqual([expect.stringContaining('STANDING RESUME: this is a handover. Read')]);
   });
 
   it('a running turn blocks the clear', async () => {

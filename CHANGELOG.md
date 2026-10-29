@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.22 - 2026-10-29
+
+- Standing: the resume line now reads "STANDING RESUME: this is a handover. Read <standing.md> first, then do every after-handover step your CLAUDE.md names (required reading included), then answer the prompt." The old line ("read ... first, then answer the prompt") let a tree with required reading after each handover (Strategy_Advisor CLAUDE.md: read docs/REQUIRED_READING.md whole after every handover) answer from standing.md alone.
+
 ## 0.5.21 - 2026-10-29
 
 - Standing: the first prompt meta's restart_windows.py types into a relaunched window ("Window restarted by Ryan v2 ...") no longer counts as the User. It arrives with origin composer, so every restart held the standing clear for userQuietMinutes (Pull_Area and Mechanism_Analyst, restarted 17:10, cleared 18:10 instead of about 17:15).
