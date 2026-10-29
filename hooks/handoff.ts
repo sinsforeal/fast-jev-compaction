@@ -285,7 +285,7 @@ export async function resetClearFailures(host: HandoffHost, sessionId: string): 
 }
 
 /** 0.5.17: true once the session id differs from `sessionId`; false after CONSOLE_CONFIRM_MS or when the id cannot be read. */
-async function waitForNewId(host: HandoffHost, sessionId: string): Promise<boolean> {
+export async function waitForNewId(host: HandoffHost, sessionId: string): Promise<boolean> {
   const polls = Math.ceil(CONSOLE_CONFIRM_MS / CONSOLE_CONFIRM_POLL_MS);
   for (let i = 0; i < polls; i++) {
     try { if (await host.session.id() !== sessionId) return true; } catch { return false; }
@@ -300,12 +300,26 @@ async function pause(host: HandoffHost): Promise<void> {
 }
 
 /** Only a host that lists a runnable `clear` may clear. An unknown capability is not permission. */
-async function clearAvailable(host: HandoffHost): Promise<boolean> {
+export async function clearAvailable(host: Pick<HandoffHost, 'command'>): Promise<boolean> {
   try {
     return (await host.command.list()).some(c => c.name === 'clear');
   } catch {
     return false;
   }
+}
+
+/**
+ * 0.5.19: why a standing clear must wait, or undefined. A handoff clear in flight, an order out (SOON/NOW sent,
+ * file not yet taken) or an unreadable record all hold it back. A given-up or clear-blocked cycle does not.
+ */
+export async function handoffBlocking(host: Pick<HandoffHost, 'store'>, sessionId: string): Promise<string | undefined> {
+  if (pendingClears.has(sessionId)) return 'a handoff clear is in flight';
+  if (pendingOrders.has(sessionId)) return 'a handoff order is pending';
+  try {
+    const state = await load(host as HandoffHost, sessionId);
+    if (state.orderAt !== undefined && !state.gaveUp && !state.clearBlocked) return 'a handoff order is outstanding';
+  } catch { return 'the handoff record is unreadable'; }
+  return undefined;
 }
 
 /**

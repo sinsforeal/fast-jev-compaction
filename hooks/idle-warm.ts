@@ -11,9 +11,15 @@
  * usage, and re-arms, at most `idleWarmMax` times per gap. Never submits a prompt, never
  * warms while a turn runs, never throws out of the timer.
  *
+ * 0.5.19: a standing tree (window.json `standing`) is armed with a StandingArm. Its first check is at
+ * (cache TTL - coldMarginMinutes) of real idle, and the step in hooks/standing.ts decides: write the standing
+ * handover, clear the session, ping because the User spoke lately, or nothing. Other trees are untouched.
+ *
  * Host loader contract: `$` goes only to top-level functions, so everything here is a
  * module-level function that takes the state as an argument, not a closure factory.
  */
+
+import { createStandingState, standingStep, type StandingArm, type StandingGap, type StandingHost, type StandingState } from './standing.js';
 
 export type WarmUsage = {
   input_tokens: number;
@@ -37,10 +43,16 @@ export type WarmHost = {
 
 type Cancel = { cancel: () => void };
 /** minutes/max are the per-tree values taken when the gap was armed (0.5.12). */
-type Gap = { sid: string; timer?: Cancel; count: number; running: boolean; warming: boolean; minutes: number; max: number; epoch: number };
+type Gap = {
+  sid: string; timer?: Cancel; count: number; running: boolean; warming: boolean; minutes: number; max: number; epoch: number;
+  /** 0.5.19: set when the tree is standing at arm time. needMs = real idle the next check waits for. */
+  standing?: StandingArm; needMs: number; st: StandingGap;
+};
 
 export type WarmState = {
   gaps: Map<string, Gap>;
+  /** 0.5.19: standing handover state (User-quiet times, resume lines). */
+  standing: StandingState;
   /** 0.5.18: the live main-thread session id, from the latest activity. A Gap under any other id is dead. */
   sid?: string;
   /** 0.5.18: Date.now() of the latest real main-thread activity (prompt, turn end, append). Warm pings do not count. */
@@ -55,7 +67,7 @@ export const WARM_PROMPT = 'Reply with the single word ok.';
 
 /** 0.5.12: no global on/off. The interval and cap come from the effective per-tree config at each arm. */
 export function createWarmState(): WarmState {
-  return { gaps: new Map(), lastActive: 0 };
+  return { gaps: new Map(), lastActive: 0, standing: createStandingState() };
 }
 
 const LOG_FILE = '.claude/fast-jev-compaction.log';
@@ -79,7 +91,7 @@ async function warmLog($: WarmHost, text: string): Promise<void> {
 
 function gapFor(state: WarmState, sid: string): Gap {
   let gap = state.gaps.get(sid);
-  if (!gap) { gap = { sid, count: 0, running: false, warming: false, minutes: 0, max: 0, epoch: 0 }; state.gaps.set(sid, gap); }
+  if (!gap) { gap = { sid, count: 0, running: false, warming: false, minutes: 0, max: 0, epoch: 0, needMs: 0, st: { tries: 0, clearFails: 0 } }; state.gaps.set(sid, gap); }
   return gap;
 }
 
@@ -121,10 +133,12 @@ async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?
   if (gap.running || gap.warming || gap.timer !== undefined) return; // a turn or a new arm came during the id read
   // 0.5.18: ping only after the interval of real idle. Activity that never reached prompt.submit or
   // turn.complete (a delivery-started turn, tool results) moved lastActive; wait out the remainder.
-  const need = gap.minutes * 60_000;
+  const arm = gap.standing;
+  const need = arm ? gap.needMs : gap.minutes * 60_000;
   const idle = Date.now() - state.lastActive;
   if (idle < need - IDLE_SLACK_MS) { armWarm($, state, gap, Math.max(1_000, need - idle)); return; }
   gap.warming = true;
+  if (arm) { await fireStanding($, state, gap, arm, idle); return; }
   const n = gap.count + 1;
   const after = n * gap.minutes;
   try {
@@ -141,6 +155,37 @@ async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?
   } catch {
     gap.count = n;
     try { await warmLog($, `idle warm ${n} failed after ${after} min: fork threw; warming stops for this gap`); } catch { /* swallowed */ }
+  } finally {
+    gap.warming = false;
+  }
+}
+
+/**
+ * 0.5.19: the timer of a standing tree. standingStep decides; this carries out a ping or a re-arm and
+ * drops the gap after a clear. Same guards as the plain ping: a prompt that came meanwhile owns the next arm.
+ */
+async function fireStanding($: WarmHost, state: WarmState, gap: Gap, arm: StandingArm, idle: number): Promise<void> {
+  try {
+    const step = await standingStep($ as unknown as StandingHost, state.standing, gap.st, arm, gap.sid,
+      () => ({ running: gap.running, lastActive: state.lastActive }), text => warmLog($, text));
+    if (gap.running || gap.timer !== undefined) return; // a prompt came meanwhile: its turn owns the next arm
+    if (step.kind === 'stop') return;
+    if (step.kind === 'cleared') { dropGap(state, gap); return; }
+    if (step.kind === 'rearm') { gap.needMs = idle + step.delayMs; armWarm($, state, gap, step.delayMs); return; }
+    const n = gap.count + 1;
+    const after = Math.round(idle / 60_000);
+    const result = await $.model.fork({ prompt: WARM_PROMPT });
+    if (gap.running || gap.timer !== undefined) return;
+    gap.count = n;
+    if (result === null) {
+      await warmLog($, `idle warm ${n} failed after ${after} min: fork returned null (cold snapshot or API error); warming stops for this gap`);
+      return;
+    }
+    const u = result.usage;
+    await warmLog($, `idle warm ${n} after ${after} min: cache_read ${u.cache_read_input_tokens}, cache_write ${u.cache_creation_input_tokens}, out ${u.output_tokens}`);
+    if (n < gap.max) { gap.needMs = idle + step.delayMs; armWarm($, state, gap, step.delayMs); }
+  } catch {
+    try { await warmLog($, 'standing: step threw (details omitted); warming stops for this gap'); } catch { /* swallowed */ }
   } finally {
     gap.warming = false;
   }
@@ -189,7 +234,7 @@ export function warmSubmit(state: WarmState, sid: string): void {
  * A main-thread turn finished (or a submission was dropped): the idle gap starts now.
  * `epoch` is warmEpoch() read before the caller's awaits; a prompt submitted since then owns the next arm.
  */
-export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: number, max: number, epoch?: number): void {
+export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: number, max: number, epoch?: number, arm?: StandingArm): void {
   try {
     const gap = gapFor(state, sid);
     // During a warm, a turn.complete with no prompt before it is the fork's own: ignore it.
@@ -200,6 +245,10 @@ export function warmIdle($: WarmHost, state: WarmState, sid: string, minutes: nu
     gap.count = 0;
     gap.minutes = minutes;
     gap.max = max;
+    gap.standing = arm;
+    gap.st = { tries: 0, clearFails: 0 };
+    // 0.5.19: a standing tree checks at the cold boundary whatever idleWarmMinutes says.
+    if (arm) { gap.needMs = arm.coldBoundaryMs; armWarm($, state, gap, arm.coldBoundaryMs); return; }
     // 0 = off for this tree (also when the option is on): no timer.
     if (!(minutes > 0)) { cancelTimer(gap); return; }
     armWarm($, state, gap);

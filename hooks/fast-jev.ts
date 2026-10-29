@@ -13,6 +13,7 @@ import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFail
 import { transcriptPath } from './color-carry.js';
 import { consoleClear, onWindows } from './console-clear.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
+import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
 import type { DeliveryOn } from './runtime-contract.js';
 import { FidelityLedger } from './fidelity.js';
@@ -56,7 +57,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.18/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.19/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -558,7 +559,8 @@ async function resolvedCwd($: CwdHost): Promise<string | undefined> {
  */
 const WINDOW_FILE = 'window.json';
 const WINDOW_MIN_AT = 50_000;
-type WindowFile = { handoffAt?: number; handoffForceAt?: number; idleWarmMinutes?: number; idleWarmMax?: number; arm?: string; until?: string };
+/** standing: StandingOptions = on; null = `{enabled:false}`; standingError = the key is bad (the file's other keys stay in force, 0.5.19). */
+type WindowFile = { handoffAt?: number; handoffForceAt?: number; idleWarmMinutes?: number; idleWarmMax?: number; arm?: string; until?: string; standing?: StandingOptions | null; standingError?: string };
 type WindowState = {
   /** path -> parse result of the file at that mtime (value undefined = rejected). */
   cache: Map<string, { mtimeMs: number; value?: WindowFile }>;
@@ -574,6 +576,8 @@ type WindowHost = LogHost & CwdHost & {
 type EffectiveWindow = {
   handoffAt: number; handoffForceAt: number; windowSource: string;
   idleWarmMinutes: number; idleWarmMax: number; warmFromFile: boolean;
+  /** 0.5.19: the tree's standing options when window.json has `standing.enabled`; absent = 0.5.18 behaviour. */
+  standing?: StandingOptions;
 };
 
 function optionsWindow(configured: HookConfig): EffectiveWindow {
@@ -608,8 +612,12 @@ function parseWindowFile(text: string): WindowFile | string {
     if (v < 0) return `${key} ${v} is negative`;
     out[key] = Math.floor(v);
   }
+  const standing = parseStandingOptions(rec.standing);
+  if (typeof standing === 'string') out.standingError = standing;
+  else if (standing !== undefined) out.standing = standing;
   if (out.handoffAt === undefined && out.handoffForceAt === undefined && out.idleWarmMinutes === undefined && out.idleWarmMax === undefined) {
-    return 'no handoffAt, handoffForceAt, idleWarmMinutes or idleWarmMax';
+    if (out.standingError !== undefined) return out.standingError;
+    if (out.standing === undefined) return 'no handoffAt, handoffForceAt, idleWarmMinutes or idleWarmMax';
   }
   if (out.handoffAt !== undefined && out.handoffAt < WINDOW_MIN_AT) return `handoffAt ${out.handoffAt} is below ${WINDOW_MIN_AT}`;
   if (out.handoffForceAt !== undefined && out.handoffForceAt <= 0) return `handoffForceAt ${out.handoffForceAt} is not positive`;
@@ -642,6 +650,9 @@ async function effectiveWindow($: WindowHost, configured: HookConfig, dir: strin
           state.warned.set(path, mtimeMs);
           await appendLog($, await tag($, `warn: ${path} ignored (${parsed}); the options stay in force`));
         }
+        if (typeof parsed !== 'string' && parsed.standingError !== undefined) {
+          await appendLog($, await tag($, `warn: ${path} standing ignored (${parsed.standingError}); the rest of the file stays in force`));
+        }
       }
       if (entry.value) {
         const at = entry.value.handoffAt ?? configured.handoffAt;
@@ -652,19 +663,23 @@ async function effectiveWindow($: WindowHost, configured: HookConfig, dir: strin
           windowSource: entry.value.arm ? `window.json (arm ${entry.value.arm})` : 'window.json',
           idleWarmMinutes: entry.value.idleWarmMinutes ?? configured.idleWarmMinutes, idleWarmMax: warmMax,
           warmFromFile: entry.value.idleWarmMinutes !== undefined || entry.value.idleWarmMax !== undefined,
+          ...(entry.value.standing ? { standing: entry.value.standing } : {}),
         };
       }
     }
     const warmText = result.warmFromFile
       ? `, idle warm ${result.idleWarmMinutes > 0 ? `${result.idleWarmMinutes} min x${result.idleWarmMax}` : 'off'}`
       : '';
-    const key = `${result.windowSource} ${result.handoffAt}/${result.handoffForceAt}${warmText}`;
+    const standingText = result.standing
+      ? `, standing on (min ${result.standing.minTokens} tokens, User quiet ${result.standing.userQuietMinutes} min, cold margin ${result.standing.coldMarginMinutes} min)`
+      : '';
+    const key = `${result.windowSource} ${result.handoffAt}/${result.handoffForceAt}${warmText}${standingText}`;
     const before = state.last.get(path) ?? `options ${options.handoffAt}/${options.handoffForceAt}`;
     if (key !== before) {
       state.last.set(path, key);
       await appendLog($, await tag($, result.windowSource === 'options'
         ? `handoff window back to options ${result.handoffAt}/${result.handoffForceAt}`
-        : `handoff window ${result.handoffAt}/${result.handoffForceAt}${warmText} from ${result.windowSource}${state.cache.get(path)?.value?.until ? ` until ${state.cache.get(path)!.value!.until}` : ''}`));
+        : `handoff window ${result.handoffAt}/${result.handoffForceAt}${warmText}${standingText} from ${result.windowSource}${state.cache.get(path)?.value?.until ? ` until ${state.cache.get(path)!.value!.until}` : ''}`));
     }
   } catch { result = options; }
   return result;
@@ -686,8 +701,17 @@ async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roo
   try {
     const cwd = await resolvedCwd($);
     const win = await windowFor($, configured, roots, sid, cwd, state);
+    // 0.5.19: a standing tree gets its arm: the resolved handoff dir, the options, the User-quiet time persisted.
+    let arm: StandingArm | undefined;
+    if (win.standing && configured.handoffDir) {
+      try {
+        const dir = await roots.resolve(cwd, sid, configured.handoffDir, text => log($, text));
+        arm = makeStandingArm(win.standing, dir, (previous, id) => roots.seed(previous, id));
+        await standingPersistUser($ as unknown as { store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } }, warm.standing, sid);
+      } catch { arm = undefined; }
+    }
     // 0.5.18: `epoch` was read before the awaits above; a prompt that came meanwhile owns the next arm.
-    warmIdle($, warm, sid, win.idleWarmMinutes, win.idleWarmMax, epoch);
+    warmIdle($, warm, sid, win.idleWarmMinutes, win.idleWarmMax, epoch, arm);
   } catch { /* the warm never blocks a turn */ }
 }
 
@@ -794,6 +818,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let sid = '';
     try { sid = await $.session.id(); } catch { /* legacy host */ }
     if (sid) { warmSubmit(idleWarm, sid); }
+    // 0.5.19: the User's own messages (composer, bridge, feed / pick-assist channel) set the User-quiet clock.
+    if (sid) standingNoteUser(idleWarm.standing, sid, event.origin, event.text);
     // 0.5.16: a typed or bridge prompt is a person; it lifts the host guard that refused the plugin's clear.
     const originKind = (event.origin as { kind?: string } | undefined)?.kind;
     if (sid && (originKind === 'composer' || originKind === 'bridge')) {
@@ -815,7 +841,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
         await log($, `handoff order carried as context on the next prompt (${String((event.origin as { kind?: string } | undefined)?.kind ?? 'unknown')}); own submit had not reached the model`);
       }
     }
+    // 0.5.19: the first prompt (any origin) in a session made by a standing clear is told to read the old standing.md.
+    type StandingStore = { store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void>; delete: (k: string) => Promise<void> } };
+    const standingCtx = sid ? await standingResumeContext($ as unknown as StandingStore, idleWarm.standing, sid) : undefined;
+    if (standingCtx) {
+      event = { ...event, context: [...(event.context ?? []), standingCtx] };
+      await log($, `standing: resume line carried as context on the next prompt (${String((event.origin as { kind?: string } | undefined)?.kind ?? 'unknown')})`);
+    }
     const result = await next(event);
+    if (standingCtx && sid && result.drop === undefined) await standingResumeDone($ as unknown as StandingStore, idleWarm.standing, sid);
     // A dropped submission runs no turn, so no turn.complete would re-arm the warm.
     if (sid && result.drop !== undefined) await armIdleWarm($ as unknown as WindowHost & WarmHost, configured, handoffRoots, sid, windows, idleWarm, warmEpoch(idleWarm, sid));
     if (result.drop === undefined) {
