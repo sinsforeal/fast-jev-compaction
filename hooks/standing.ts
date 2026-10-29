@@ -218,7 +218,7 @@ export async function checkStanding($: FsHost, path: string, sid: string, lastAc
 
 // ---- Resume context ------------------------------------------------------------------------------------------
 
-export const resumeLine = (path: string): string => `STANDING RESUME: read ${path} first, then answer the prompt.`;
+export const resumeLine = (path: string): string => `STANDING RESUME: this is a handover. Read ${path} first, then do every after-handover step your CLAUDE.md names (required reading included), then answer the prompt.`;
 
 /** The context to attach to a prompt in `sid`, if a standing clear made this session. Never throws. */
 export async function standingResumeContext($: StoreHost, state: StandingState, sid: string): Promise<string | undefined> {
