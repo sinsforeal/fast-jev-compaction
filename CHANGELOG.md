@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.21 - 2026-10-29
+
+- Standing: the first prompt meta's restart_windows.py types into a relaunched window ("Window restarted by Ryan v2 ...") no longer counts as the User. It arrives with origin composer, so every restart held the standing clear for userQuietMinutes (Pull_Area and Mechanism_Analyst, restarted 17:10, cleared 18:10 instead of about 17:15).
+
 ## 0.5.20 - 2026-10-29
 
 - Fix: 0.5.19 did not load in any session. The host loader refused `standing.ts` `await $.store.delete?.(...)` ("$.store.delete is used as a value"), so the whole module was off: no handoff orders, clears or keep-warm from 16:10 local. `standingResumeDone` now overwrites the record with `$.store.set(key, {})` (the reader already ignores a record without `path`).

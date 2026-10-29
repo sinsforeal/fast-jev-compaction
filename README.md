@@ -270,7 +270,7 @@ probabilities. Error bodies and credentials are omitted. Recovery reasons and
 chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
 
 The first callback for each session per registration writes a disk-only receipt:
-`module-loaded hook=fast-jev-compaction@0.5.20/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+`module-loaded hook=fast-jev-compaction@0.5.21/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
 The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
 value or error body. A cache or manifest version alone is not a loaded receipt.
 Callback re-registration can emit another receipt for the same session.
@@ -313,7 +313,7 @@ own automatic compaction; the plugin cannot disable an independent harness path.
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.20 before reloading,
+Confirm both marketplace and cached plugin manifests say 0.5.21 before reloading,
 then require a fresh callback `module-loaded` receipt for the intended full session id.
 Native function-hook scanning and a live handoff remain separate install checks;
 unit tests and a version string do not prove either.
