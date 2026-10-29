@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.19 - 2026-10-29
+
+- Standing handover. Per tree, off unless `var/handoffs/window.json` has `"standing": {"enabled": true, "minTokens": 150000, "userQuietMinutes": 60, "coldMarginMinutes": 5}` (read at each arm; a bad `standing` key is warned and ignored, the rest of the file stays). Absent or disabled: behaviour exactly as 0.5.18.
+- A standing tree's idle timer first fires at (60 - coldMarginMinutes) min of real idle. With context at or above minTokens: the User spoke inside userQuietMinutes, so a warm ping and a re-check when the quiet is up; else `standing.md` not fresh (older than the last real main-thread activity), so one `$.model.fork` with a fixed prompt writes it (header `session:` / `standing:`, six sections, last line COMPLETE; an invalid text is rejected and logged, the old file stays; the old file is kept as `standing.prev.md`); fresh and complete, no turn running, no handoff order pending, so the session is cleared in-process (`$.command.run clear`, console fallback as the handoff clear) with no prompt submitted. Below minTokens a standing tree does nothing, no ping.
+- `standing_clear.json` {old_sid, at, tokens} is written in the old and the new session folder, plus `resumed.json` (so SessionStart skips) and `current_session.json`. The next prompt of any origin in the new session carries the context `STANDING RESUME: read <old standing.md> first, then answer the prompt.` (memory, with a `$.store` record for a reload). No pings after a clear.
+- The User's last message time per session: origin `composer`, `bridge`, and the feed / pick-assist channel records. Peer, heartbeat, task notification, schedule and plugin prompts do not count. Kept in memory and persisted to `$.store` (`standing:<sid>`) at each arm.
+- New `hooks/standing.ts`; `handoff.ts` exports `clearAvailable`, `waitForNewId`, `handoffBlocking`. Log lines `standing: ...` in the existing plugin log. Tests: `tests/standing.test.ts` (22).
+
 ## 0.5.18 - 2026-10-27
 
 - Idle warm timer fixed. The 10-24 log showed two interleaved chains per session tag: the real one (resets at the next turn) and a second one (n=4..9 over hours of turns) whose cache_read grew with the live context. That second chain was a Gap armed under an id that no longer receives events (pre-clear or pre-handoff), whose timer survived and pinged the current conversation until `idleWarmMax`. The `[sid]` tag on the log line is the live id at fire time, which hid it.
