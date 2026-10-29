@@ -177,7 +177,7 @@ The UI diagnostics themselves are not sent as model context. All receipts remain
 in `~/.claude/fast-jev-compaction.log`; log failures never alter the cut.
 
 The first registered callback per session writes a disk-only `module-loaded`
-receipt with `hook=fast-jev-compaction@0.5.19/forced-handoff-floor`, the full session
+receipt with `hook=fast-jev-compaction@0.5.20/forced-handoff-floor`, the full session
 id and `DISABLE_AUTO_COMPACT=1|unset|other|unreadable`. It never logs an arbitrary
 environment value or error. Registration alone writes nothing; callback reload
 may emit a new receipt for the same session. Require a fresh intended-session

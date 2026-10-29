@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.20 - 2026-10-29
+
+- Fix: 0.5.19 did not load in any session. The host loader refused `standing.ts` `await $.store.delete?.(...)` ("$.store.delete is used as a value"), so the whole module was off: no handoff orders, clears or keep-warm from 16:10 local. `standingResumeDone` now overwrites the record with `$.store.set(key, {})` (the reader already ignores a record without `path`).
+
 ## 0.5.19 - 2026-10-29
 
 - Standing handover. Per tree, off unless `var/handoffs/window.json` has `"standing": {"enabled": true, "minTokens": 150000, "userQuietMinutes": 60, "coldMarginMinutes": 5}` (read at each arm; a bad `standing` key is warned and ignored, the rest of the file stays). Absent or disabled: behaviour exactly as 0.5.18.

@@ -230,10 +230,11 @@ export async function standingResumeContext($: StoreHost, state: StandingState, 
 }
 
 /** The prompt entered with the context: the line is spent. */
-export async function standingResumeDone($: StoreHost & { store: { delete?: (key: string) => Promise<void> } }, state: StandingState, sid: string): Promise<void> {
+export async function standingResumeDone($: StoreHost, state: StandingState, sid: string): Promise<void> {
   state.resume.delete(sid);
   state.looked.add(sid);
-  try { await $.store.delete?.(`standing_resume:${sid}`); } catch { /* a stale record only repeats a harmless line */ }
+  // Overwrite, never `$.store.delete?.(...)`: the host loader refuses a $ member read as a value (0.5.19 failed to load, 10-29).
+  try { await $.store.set(`standing_resume:${sid}`, {}); } catch { /* a stale record only repeats a harmless line */ }
 }
 
 // ---- The timer step ------------------------------------------------------------------------------------------
