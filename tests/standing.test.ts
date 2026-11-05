@@ -173,8 +173,8 @@ describe('standing: timer and backstop', () => {
     }
   });
 
-  it('below minTokens: nothing at all, no write, no clear, no ping', async () => {
-    const h = harness({ tokens: 100_000 });
+  it('below minTokens, idle warm off for the tree (idleWarmMinutes 0): nothing at all, no write, no clear, no ping', async () => {
+    const h = harness({ tokens: 100_000, options: { idleWarmMinutes: 0 } });
     await userTurn(h);
     expect(h.live()[0]!.ms).toBe(55 * MIN);
     await h.fire(h.live()[0]!);
@@ -182,6 +182,90 @@ describe('standing: timer and backstop', () => {
     expect(h.clearRun).not.toHaveBeenCalled();
     expect(h.live()).toHaveLength(0);
     expect(h.log()).toContain('standing: skip, context 100000 is under minTokens 150000');
+  });
+
+  it('0.5.23 below minTokens: the plain idle warm ping, spaced idleWarmMinutes, no skip line, no write, no clear', async () => {
+    const h = harness({ tokens: 100_000 });
+    await userTurn(h);
+    expect(h.live()[0]!.ms).toBe(55 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toEqual([WARM]);
+    expect(h.clearRun).not.toHaveBeenCalled();
+    expect([...h.files.keys()].filter(k => k.includes('standing'))).toEqual([]);
+    expect(h.log()).toContain('idle warm 1 after 55 min: cache_read 212345, cache_write 41, out 700');
+    expect(h.log()).not.toContain('under minTokens');
+    expect(h.live()).toHaveLength(1);
+    expect(h.live()[0]!.ms).toBe(50 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toEqual([WARM, WARM]);
+    expect(h.log()).toContain('idle warm 2 after 105 min');
+    expect(h.log()).not.toContain('under minTokens');
+    expect(h.live()).toHaveLength(1);
+  });
+
+  it('0.5.23 below minTokens: pings count toward idleWarmMax, then stop; a turn resets the count', async () => {
+    const h = harness({ tokens: 100_000, options: { idleWarmMax: 3 } });
+    await userTurn(h);
+    for (let k = 1; k <= 3; k++) {
+      expect(h.live()).toHaveLength(1);
+      await h.fire(h.live()[0]!);
+      expect(h.log()).toContain(`idle warm ${k} after`);
+    }
+    expect(h.prompts).toEqual([WARM, WARM, WARM]);
+    expect(h.live()).toHaveLength(0);
+    expect(h.log()).not.toContain('idle warm 4');
+    expect(h.log()).not.toContain('under minTokens');
+    await userTurn(h); // a new gap: the count starts again
+    expect(h.live()).toHaveLength(1);
+    await h.fire(h.live()[0]!);
+    expect(h.log()).toContain('idle warm 1 after 55 min');
+  });
+
+  it('0.5.23 the per-tree window.json idleWarmMinutes and idleWarmMax set the under-min ping', async () => {
+    const h = harness({ tokens: 100_000 });
+    h.put(`${DIR}/window.json`, JSON.stringify({ handoffAt: 250000, idleWarmMinutes: 40, idleWarmMax: 2, standing: { enabled: true } }));
+    await userTurn(h);
+    expect(h.live()[0]!.ms).toBe(55 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.live()[0]!.ms).toBe(40 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toEqual([WARM, WARM]);
+    expect(h.live()).toHaveLength(0);
+  });
+
+  it('0.5.23 under-min pings: the context grows past minTokens at a later check, the standing path takes over', async () => {
+    const h = harness({ tokens: 100_000 });
+    await userTurn(h);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toEqual([WARM]);
+    h.setTokens(200_000);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts.filter(p => p !== WARM)).toHaveLength(1);
+    expect(h.clearRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('0.5.23 at exactly minTokens: the standing path as before, no extra ping', async () => {
+    const h = harness({ tokens: 150_000 });
+    await userTurn(h);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toHaveLength(1);
+    expect(h.prompts[0]).toContain('STANDING HANDOVER');
+    expect(h.files.has(h.standingPath())).toBe(true);
+    expect(h.clearRun).toHaveBeenCalledTimes(1);
+    expect(h.log()).not.toContain('idle warm');
+    expect(h.log()).not.toContain('under minTokens');
+  });
+
+  it('0.5.23 a tree without standing, context under 150k: the plain ping every 50 min, unchanged', async () => {
+    const h = harness({ tokens: 100_000, standing: false });
+    await userTurn(h);
+    expect(h.live()[0]!.ms).toBe(50 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.live()[0]!.ms).toBe(50 * MIN);
+    await h.fire(h.live()[0]!);
+    expect(h.prompts).toEqual([WARM, WARM]);
+    expect(h.log()).toContain('idle warm 2 after 100 min');
+    expect(h.log()).not.toContain('standing:');
   });
 
   it('arms at the cold boundary (60 - margin), also when idleWarmMinutes is 0', async () => {
@@ -397,7 +481,7 @@ describe('standing: the fresh start', () => {
     expect(h.prompts).toEqual([WARM]);
   });
 
-  it('no pings after a clear: the old timers are dead and the new small session is not kept warm', async () => {
+  it('no pings after a clear: the old timers are dead; 0.5.23: the new small session gets the plain idle warm ping, no clear', async () => {
     const h = harness();
     await userTurn(h);
     h.advance(1000);
@@ -410,13 +494,14 @@ describe('standing: the fresh start', () => {
     h.advance(5 * 60 * MIN);
     await h.fire(t); // a stale timer of the old id
     expect(h.fork).not.toHaveBeenCalled();
-    // the new session answers a prompt; its context is small, so nothing is armed to ping
+    // the new session answers a prompt; its context is small: until 0.5.22 nothing pinged, since 0.5.23 the plain idle warm does
     h.setTokens(40_000);
     await h.submit({ kind: 'peer' }, 'wake');
     await h.complete();
     for (const x of h.live()) await h.fire(x);
-    expect(h.fork).not.toHaveBeenCalled();
+    expect(h.prompts).toEqual([WARM]);
     expect(h.clearRun).toHaveBeenCalledTimes(1);
-    expect(h.log()).not.toMatch(/idle warm \d/);
+    expect(h.log()).toContain('idle warm 1 after 55 min');
+    expect(h.log()).not.toContain('under minTokens');
   });
 });

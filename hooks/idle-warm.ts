@@ -15,6 +15,10 @@
  * (cache TTL - coldMarginMinutes) of real idle, and the step in hooks/standing.ts decides: write the standing
  * handover, clear the session, ping because the User spoke lately, or nothing. Other trees are untouched.
  *
+ * 0.5.23: a standing tree whose context is under minTokens (or unreadable) pings as before standing: the step
+ * returns a ping with the tree's idleWarmMinutes spacing, the ping counts toward idleWarmMax, and no skip line is
+ * logged. idleWarmMinutes 0 (warm off for the tree) keeps the skip line and no ping.
+ *
  * Host loader contract: `$` goes only to top-level functions, so everything here is a
  * module-level function that takes the state as an argument, not a closure factory.
  */
@@ -167,7 +171,7 @@ async function fireWarm($: WarmHost, state: WarmState, gap: Gap, mine: { handle?
 async function fireStanding($: WarmHost, state: WarmState, gap: Gap, arm: StandingArm, idle: number): Promise<void> {
   try {
     const step = await standingStep($ as unknown as StandingHost, state.standing, gap.st, arm, gap.sid,
-      () => ({ running: gap.running, lastActive: state.lastActive }), text => warmLog($, text));
+      () => ({ running: gap.running, lastActive: state.lastActive }), text => warmLog($, text), gap.minutes > 0 ? gap.minutes * 60_000 : 0);
     if (gap.running || gap.timer !== undefined) return; // a prompt came meanwhile: its turn owns the next arm
     if (step.kind === 'stop') return;
     if (step.kind === 'cleared') { dropGap(state, gap); return; }
