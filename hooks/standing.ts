@@ -263,12 +263,14 @@ const minutes = (ms: number): number => Math.round(ms / MIN);
 
 export async function standingStep(
   $: StandingHost, state: StandingState, st: StandingGap, arm: StandingArm, sid: string,
-  live: LiveView, log: (text: string) => Promise<void>,
+  live: LiveView, log: (text: string) => Promise<void>, underMinPingMs = 0,
 ): Promise<StandingStep> {
   const cold = arm.coldBoundaryMs;
   let tokens: number | undefined;
   try { tokens = (await $.session.usage()).context.tokens; } catch { tokens = undefined; }
   if (tokens === undefined || !(tokens >= arm.minTokens)) {
+    // 0.5.23: under the minimum the plain idle warm applies (the caller passes its spacing; 0 = idle warm off for the tree).
+    if (underMinPingMs > 0) return { kind: 'ping', delayMs: Math.min(cold, underMinPingMs) };
     await log(`standing: skip, context ${tokens ?? 'unknown'} is under minTokens ${arm.minTokens}; no write, no clear, no ping`);
     return { kind: 'stop' };
   }

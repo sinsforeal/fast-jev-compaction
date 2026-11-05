@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.23 - 2026-11-05
+
+- Fix: a standing tree with context under `standing.minTokens` (or an unreadable context) is kept warm again. Until 0.5.22 the timer logged `standing: skip, context N is under minTokens ...; no write, no clear, no ping` and did nothing, so the cache expired and the next prompt rewrote the whole context (7-day study: 143 skips, 135 cold resumes under 150k at about 0.82 USD each). Now `standingStep` returns a ping with the tree's `idleWarmMinutes` spacing (capped at the cold boundary), the ping counts toward `idleWarmMax` for the gap, and the usual `idle warm <n> after <m> min: ...` line is logged; the skip line is not. `idleWarmMinutes` 0 (warm off for the tree) keeps the old skip and no ping. The first check is still at (60 - coldMarginMinutes) min. At or above `minTokens` nothing changes. Trees without standing are untouched.
+- Tests: `tests/standing.test.ts` 22 to 28 (under-min ping and spacing, cap then stop, window.json spacing and cap, growth past the minimum, exactly minTokens, non-standing under 150k); the old under-min and "no pings after a clear" tests now state the new rule.
+
 ## 0.5.22 - 2026-10-29
 
 - Standing: the resume line now reads "STANDING RESUME: this is a handover. Read <standing.md> first, then do every after-handover step your CLAUDE.md names (required reading included), then answer the prompt." The old line ("read ... first, then answer the prompt") let a tree with required reading after each handover (Strategy_Advisor CLAUDE.md: read docs/REQUIRED_READING.md whole after every handover) answer from standing.md alone.
