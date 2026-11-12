@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { register, toSessionMessages } from '../hooks/fast-jev.ts';
+import { setLogSettleMs } from '../hooks/disk-log.ts';
 import { applyDecisions, decideCall, messageChars } from '../src/compact.js';
 import { collectToolCalls } from '../src/state.js';
 import { collectPins, pinStoreKey, readPinProvenance, readPinRecord } from '../hooks/pin-provenance.js';
@@ -434,7 +435,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.23/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.24/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');
@@ -465,5 +466,89 @@ describe('module-loaded callback receipt', () => {
     });
     await force(h);
     expect(h.marker().order).toBe('now');
+  });
+});
+
+// 0.5.24: the host has no append, so two processes can read the log before either writes and the
+// later write replaces the earlier line (11-12: two of six restarted sessions lost their receipt).
+describe('disk log with concurrent writers', () => {
+  const LOG = 'F:/temp/jev-floor/.claude/fast-jev-compaction.log';
+  beforeEach(() => setLogSettleMs(10)); // production waits 25 ms; the suite default is 0 (tests/setup.ts)
+  afterEach(() => setLogSettleMs(0));
+
+  it('second session reads before the first writes: both module-loaded receipts survive', async () => {
+    const h1 = harness('unset');
+    const h2 = harness('unset');
+    const disk = h1.files; // one disk for both hosts
+    let release!: () => void;
+    const firstWritten = new Promise<void>(resolve => { release = resolve; });
+    const write1 = h1.$.fs.write.getMockImplementation()!;
+    h1.$.fs.write.mockImplementation(async (path: string, text: string) => {
+      await write1(path, text);
+      if (path === LOG) release();
+    });
+    let stale = true;
+    let clobbered = false;
+    h2.$.fs.exists = async (path: string) => {
+      if (path === LOG && stale) { stale = false; const snapshot = disk.get(path); await firstWritten; return snapshot !== undefined; }
+      return disk.has(path);
+    };
+    h2.$.fs.read = async (path: string) => { if (!disk.has(path)) throw new Error('missing'); return disk.get(path)!; };
+    let h2Writes = 0;
+    h2.$.fs.write = async (path: string, text: string) => {
+      if (path === LOG && ++h2Writes === 1) clobbered = !text.includes(`session=${h1.sid}`) && (disk.get(LOG) ?? '').includes(`session=${h1.sid}`);
+      disk.set(path, text);
+    };
+    await Promise.all([h1.turn(), h2.turn()]);
+    expect(clobbered).toBe(true); // the second write really did replace the first line
+    const text = disk.get(LOG)!;
+    expect(text.match(/module-loaded/g)).toHaveLength(2);
+    expect(text).toContain(`session=${h1.sid};`);
+    expect(text).toContain(`session=${h2.sid};`);
+  });
+
+  it('a log that always loses to another writer gives up after a bounded number of writes, never throws, and has written', async () => {
+    const h = harness('unset');
+    h.put(LOG, 'foreign line\n');
+    let receiptWrites = 0;
+    const read = h.$.fs.read.getMockImplementation()!;
+    h.$.fs.read.mockImplementation(async (path: string) => (path === LOG ? 'foreign line\n' : read(path)));
+    const write = h.$.fs.write.getMockImplementation()!;
+    h.$.fs.write.mockImplementation(async (path: string, text: string) => {
+      if (path === LOG && text.includes('module-loaded')) receiptWrites++;
+      return write(path, text);
+    });
+    const started = Date.now();
+    await h.turn();
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(receiptWrites).toBeGreaterThan(1); // it retried
+    expect(receiptWrites).toBeLessThanOrEqual(4); // and stopped
+    expect(h.files.get(LOG)).toContain("[floor-se] "); // the last write is on disk, as before 0.5.24
+  });
+
+  it('a read-back that fails stops after the first write, no retry', async () => {
+    const h = harness('unset');
+    let receiptWrites = 0;
+    const read = h.$.fs.read.getMockImplementation()!;
+    h.$.fs.read.mockImplementation(async (path: string) => { if (path === LOG) throw new Error('read refused'); return read(path); });
+    const write = h.$.fs.write.getMockImplementation()!;
+    h.$.fs.write.mockImplementation(async (path: string, text: string) => {
+      if (path === LOG && text.includes('module-loaded')) receiptWrites++;
+      return write(path, text);
+    });
+    await h.turn();
+    expect(receiptWrites).toBe(1);
+    expect(h.files.get(LOG)).toContain("[floor-se] ");
+  });
+
+  it('trims an oversized log to its newest half in the same write, keeping the new line', async () => {
+    const h = harness('unset');
+    h.put(LOG, `${'x'.repeat(600_000)}\nold last line\n`);
+    await h.turn();
+    const text = h.files.get(LOG)!;
+    expect(text.length).toBeLessThan(300_000);
+    expect(text).toContain('old last line\n');
+    expect(text.match(/module-loaded/g)).toHaveLength(1);
+    expect(text.endsWith('\n')).toBe(true);
   });
 });

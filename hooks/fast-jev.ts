@@ -11,6 +11,7 @@ import type {
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
 import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
+import { appendDiskLine } from './disk-log.js';
 import { consoleClear, onWindows } from './console-clear.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
@@ -57,7 +58,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.23/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.24/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -415,22 +416,23 @@ type LogHost = {
   };
 };
 const LOG_FILE = '.claude/fast-jev-compaction.log';
-const LOG_KEEP_CHARS = 512_000;
 
 /** 0.4.2: every toast and log line also lands on disk, under the user's home
  * (`~/.claude/fast-jev-compaction.log`), so a fallback reason or a kept cut can be
  * read back after the toast is gone. The host exposes `fs.write` only (no append):
- * read, trim to the newest half once over the cap, write. Never throws, never
- * changes a cut. */
+ * read, trim to the newest half once over the cap, write. 0.5.24: the write is
+ * checked by reading back and redone when another session's write replaced our
+ * line (hooks/disk-log.ts). Never throws, never changes a cut. */
 async function appendLog($: LogHost, text: string): Promise<void> {
   try {
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
     if (!home) return;
     const path = `${home.replace(/[\\/]+$/, '')}/${LOG_FILE}`;
-    let prior = '';
-    try { if (await $.fs.exists(path)) prior = await $.fs.read(path); } catch { prior = ''; }
-    if (prior.length > LOG_KEEP_CHARS) prior = prior.slice(prior.length - LOG_KEEP_CHARS / 2);
-    await $.fs.write(path, `${prior}${new Date().toISOString()} ${text}\n`);
+    await appendDiskLine({
+      exists: file => $.fs.exists(file),
+      read: file => $.fs.read(file),
+      write: (file, body) => $.fs.write(file, body),
+    }, path, `${new Date().toISOString()} ${text}\n`);
   } catch { /* a log that cannot be written never changes a cut */ }
 }
 

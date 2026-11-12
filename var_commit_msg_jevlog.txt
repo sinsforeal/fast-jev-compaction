@@ -1,0 +1,3 @@
+0.5.24: disk log append survives concurrent writers (verify after write, retry)
+
+appendLog and warmLog share hooks/disk-log.ts appendDiskLine: write, 25 ms settle, read back, append again if the line was replaced by another session's write. Max 4 writes, 900 ms budget, trim kept in the write. Fixes the lost module-loaded receipts of 11-12 16:56. Tests in forced-handoff.test.ts, setup file for the suite, version bump, changelog, notebook. Issue tk-8tqpub.

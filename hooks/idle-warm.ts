@@ -23,6 +23,7 @@
  * module-level function that takes the state as an argument, not a closure factory.
  */
 
+import { appendDiskLine } from './disk-log.js';
 import { createStandingState, standingStep, type StandingArm, type StandingGap, type StandingHost, type StandingState } from './standing.js';
 
 export type WarmUsage = {
@@ -75,7 +76,6 @@ export function createWarmState(): WarmState {
 }
 
 const LOG_FILE = '.claude/fast-jev-compaction.log';
-const LOG_KEEP_CHARS = 512_000;
 
 /** Same disk log and line shape as fast-jev.ts (`<iso> [sid8] text`). `$` cannot be stored, so the
  * timer's own `$` writes the line. Never throws. */
@@ -86,10 +86,11 @@ async function warmLog($: WarmHost, text: string): Promise<void> {
     let line = text;
     try { const id = await $.session.id(); if (typeof id === 'string' && id.length > 0) line = `[${id.slice(0, 8)}] ${text}`; } catch { /* untagged */ }
     const path = `${home.replace(/[\\/]+$/, '')}/${LOG_FILE}`;
-    let prior = '';
-    try { if (await $.fs.exists(path)) prior = await $.fs.read(path); } catch { prior = ''; }
-    if (prior.length > LOG_KEEP_CHARS) prior = prior.slice(prior.length - LOG_KEEP_CHARS / 2);
-    await $.fs.write(path, `${prior}${new Date().toISOString()} ${line}\n`);
+    await appendDiskLine({
+      exists: file => $.fs.exists(file),
+      read: file => $.fs.read(file),
+      write: (file, body) => $.fs.write(file, body),
+    }, path, `${new Date().toISOString()} ${line}\n`);
   } catch { /* a log that cannot be written changes nothing */ }
 }
 
