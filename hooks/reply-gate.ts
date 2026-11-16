@@ -189,11 +189,63 @@ export type TailHost = {
 
 const nativeJoin = (dir: string, name: string): string => `${dir.replace(/[\\/]+$/, '')}\\${name}`.replace(/\//g, '\\');
 
+/** The part of node:fs the tail read uses. */
+export type NodeFsLike = {
+  openSync: (path: string, flags: string) => number;
+  fstatSync: (fd: number) => { size: number };
+  readSync: (fd: number, buffer: Uint8Array, offset: number, length: number, position: number) => number;
+  closeSync: (fd: number) => void;
+};
+
+/** node:fs through `process.getBuiltinModule` (the plugin has no import of node modules); undefined when the host has none. */
+export function hostNodeFs(): NodeFsLike | undefined {
+  try {
+    const proc = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process;
+    const fs = proc?.getBuiltinModule?.('node:fs') as Partial<NodeFsLike> | undefined;
+    return fs && typeof fs.openSync === 'function' && typeof fs.readSync === 'function' && typeof fs.fstatSync === 'function' && typeof fs.closeSync === 'function'
+      ? fs as NodeFsLike : undefined;
+  } catch { return undefined; }
+}
+
 /**
- * Reads the transcript tail through a child process, so the plugin only holds the kept records. Windows: a
- * PowerShell helper written next to the handoff files. Elsewhere: tail + grep. Never throws.
+ * Plain read of the last `bytes` of the transcript with node:fs: no child process, no window. Splits on LF,
+ * drops the first line when the read starts inside the file (a cut line), and keeps the slim records.
+ * Throws on a missing or unreadable file; readTail catches.
  */
-export async function readTail(host: TailHost, input: { path: string; dir: string }): Promise<TailRead> {
+export function readTailNode(fs: NodeFsLike, path: string, bytes: number = TAIL_BYTES): Slim[] {
+  const fd = fs.openSync(path, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const n = Math.min(size, bytes);
+    const buf = new Uint8Array(n);
+    let got = 0;
+    while (got < n) {
+      const r = fs.readSync(fd, buf, got, n - got, size - n + got);
+      if (r <= 0) break;
+      got += r;
+    }
+    const lines = new TextDecoder('utf-8').decode(buf.subarray(0, got)).split('\n');
+    const out: Slim[] = [];
+    for (let i = n < size ? 1 : 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (line.length < 20) continue;
+      const rec = slimLine(line);
+      if (rec) out.push(rec);
+    }
+    return out;
+  } finally { fs.closeSync(fd); }
+}
+
+/**
+ * Reads the transcript tail. First choice: node:fs inside the plugin process (`nodeFs`, default the host's
+ * own, or null to skip). If the host has no node:fs or it throws: a child process, so the plugin only holds
+ * the kept records. Windows: a hidden PowerShell helper written next to the handoff files. Elsewhere: tail +
+ * grep. Never throws.
+ */
+export async function readTail(host: TailHost, input: { path: string; dir: string }, nodeFs: NodeFsLike | null | undefined = hostNodeFs()): Promise<TailRead> {
+  if (nodeFs) {
+    try { return { ok: true, records: readTailNode(nodeFs, input.path) }; } catch { /* fall through to the helper */ }
+  }
   try {
     const env = { FJ_PATH: onWindows() ? input.path.replace(/\//g, '\\') : input.path, FJ_TAIL: String(TAIL_BYTES) };
     let argv: string[];

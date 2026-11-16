@@ -79,6 +79,8 @@ export const GATE_MAX_ROUNDS = 20;
 export const MAX_STALE_REFRESHES = 2;
 // Only live work is in memory. A module reload cannot strand a persisted in-flight flag.
 const pendingClears = new Set<string>();
+/** 0.5.25: sessions whose unreadable-transcript WARNING was logged. */
+const gateReadWarned = new Set<string>();
 /**
  * 0.5.14: the text of the SOON/NOW order that is out for a session and whose file is not complete yet.
  * `$.prompt.submit` can end without the order ever reaching the model (21687c6d, 2026-10-20: four orders,
@@ -304,8 +306,12 @@ async function holdForReply(
     let read: TailRead;
     try { read = await gate.read(sessionId); } catch (error) { read = { ok: false, error: String((error as { message?: unknown } | undefined)?.message ?? error).slice(0, 120) }; }
     if (!read.ok) {
-      await log(`handoff: reply gate could not read the transcript (${read.error}); the clear goes without the hold`);
-      return { kind: 'go', held: false };
+      // A failing reader must not turn the feature off unseen: one WARNING line per session, then a plain line.
+      if (!gateReadWarned.has(sessionId)) {
+        gateReadWarned.add(sessionId);
+        await log(`WARNING handoff: reply gate could not read the transcript (${read.error}); the 10 min reply hold is OFF while this fails, the clear goes without it`);
+      } else await log(`handoff: reply gate could not read the transcript (${read.error}); the clear goes without the hold`);
+      return { kind: 'go', held, lastPromptAt };
     }
     const view = analyzeTail(read.records);
     lastPromptAt = view.lastPromptAt;
