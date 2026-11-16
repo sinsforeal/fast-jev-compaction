@@ -13,6 +13,7 @@ import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFail
 import { transcriptPath } from './color-carry.js';
 import { appendDiskLine } from './disk-log.js';
 import { consoleClear, onWindows } from './console-clear.js';
+import { readTail, type TailHost } from './reply-gate.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -52,6 +53,7 @@ const HOOK_DEFAULTS = {
   maxPostCompactTokens: 0,
   idleWarmMinutes: 0,
   idleWarmMax: 6,
+  replyVisibleMinMs: 600_000,
 };
 
 /** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
@@ -105,6 +107,8 @@ export type HookConfig = CompactOptions & {
   idleWarmMinutes: number;
   /** Warms per idle gap before the session counts as abandoned. */
   idleWarmMax: number;
+  /** 0.5.25: a reply to the User stays visible this long (ms) before the handoff clear; 0 = off. */
+  replyVisibleMinMs: number;
 };
 
 class JevRequestError extends Error {}
@@ -156,6 +160,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     maxPostCompactTokens: Math.max(0, Math.floor(optionNumber(options, 'maxPostCompactTokens', HOOK_DEFAULTS.maxPostCompactTokens))),
     idleWarmMinutes: Math.max(0, optionNumber(options, 'idleWarmMinutes', HOOK_DEFAULTS.idleWarmMinutes)),
     idleWarmMax: positive(optionNumber(options, 'idleWarmMax', HOOK_DEFAULTS.idleWarmMax), HOOK_DEFAULTS.idleWarmMax),
+    replyVisibleMinMs: Math.max(0, Math.floor(optionNumber(options, 'replyVisibleMinMs', HOOK_DEFAULTS.replyVisibleMinMs))),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -1123,6 +1128,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
             const cwd = await resolvedCwd($);
             return home && cwd ? transcriptPath(home, cwd, id) : undefined;
           },
+          // 0.5.25: a reply to the User stays visible replyVisibleMinMs before the clear (0 = off).
+          replyGate: configured.replyVisibleMinMs > 0 ? {
+            minMs: configured.replyVisibleMinMs,
+            read: async id => {
+              try {
+                const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
+                const cwd = await resolvedCwd($);
+                if (!home || !cwd) return { ok: false as const, error: 'no home or cwd for the transcript path' };
+                const dir = await handoffRoots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log($, text));
+                return await readTail($ as unknown as TailHost, { path: transcriptPath(home, cwd, id), dir });
+              } catch { return { ok: false as const, error: 'transcript path could not be resolved' }; }
+            },
+          } : undefined,
         });
       } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }

@@ -6,6 +6,7 @@
 
 import { carryColor, resolveColor, type AgentColorRecord } from './color-carry.js';
 import { isStoppedRefusal, type ConsoleClearResult } from './console-clear.js';
+import { analyzeTail, clockText, gateWait, type TailRead } from './reply-gate.js';
 
 export type HandoffConfig = {
   handoffAt: number;
@@ -59,6 +60,8 @@ export type HandoffState = {
   clearBlocked?: boolean;
   /** A ratio miss forces NOW independently of context size and launcher ENV. */
   forceReason?: string;
+  /** 0.5.25: NOW orders re-sent because the file went stale during the reply-visible wait; capped at MAX_STALE_REFRESHES. */
+  refreshes?: number;
 };
 
 export const SOON_STEP_TOKENS = 50_000;
@@ -68,6 +71,12 @@ export const MAX_CLEAR_FAILURES = 3;
 export const CLEAR_RETRY_COOLDOWN_MS = 10 * 60_000;
 /** Delay before a detached host call, so its hook has returned first. */
 export const DETACH_DELAY_MS = 250;
+/** 0.5.25: the reply-visible wait sleeps in slices this long, and checks the session id between them. */
+export const GATE_SLICE_MS = 30_000;
+/** 0.5.25: transcript reads per clear while the wait restarts (he keeps getting replies); then the clear goes. */
+export const GATE_MAX_ROUNDS = 20;
+/** 0.5.25: a handoff file older than a prompt that came during the wait is re-ordered this many times; then the clear uses it as it is. */
+export const MAX_STALE_REFRESHES = 2;
 // Only live work is in memory. A module reload cannot strand a persisted in-flight flag.
 const pendingClears = new Set<string>();
 /**
@@ -258,7 +267,72 @@ export type StepContext = {
    * clear with the "session was stopped" family. Absent (other platforms, tests) = today's retry behaviour.
    */
   consoleClear?: (input: { sessionId: string; dir: string }) => Promise<ConsoleClearResult>;
+  /**
+   * 0.5.25: a reply to the User stays visible `minMs` before the clear. `read` returns the kept records of the
+   * session transcript tail (never throws). Absent or minMs 0 = the clear goes at once, as before 0.5.25.
+   */
+  replyGate?: { minMs: number; read: (sessionId: string) => Promise<TailRead> };
 };
+
+type GateOutcome = { kind: 'go' | 'defer' | 'abort'; held: boolean; lastPromptAt?: number };
+
+/** Sleeps `ms` in slices; false when the session id changed meanwhile or the host cannot sleep. */
+async function sleepSliced(host: HandoffHost, sessionId: string, ms: number): Promise<'ok' | 'changed' | 'nosleep'> {
+  let left = ms;
+  while (left > 0) {
+    const slice = Math.min(left, GATE_SLICE_MS);
+    try { await host.clock.sleep(slice); } catch { return 'nosleep'; }
+    left -= slice;
+    try { if (await host.session.id() !== sessionId) return 'changed'; } catch { return 'changed'; }
+  }
+  return 'ok';
+}
+
+/**
+ * 0.5.25: holds the clear while the last reply to the User is younger than the gate. Runs inside the detached
+ * clear work, so the session stays free: the sleeps are the host's own timer, not a loop on the turn.
+ * Every round re-reads the transcript, so a new reply to him restarts the clock and a reply to a peer or a
+ * task notification does not move it. An unreadable transcript lets the clear go (a broken read must never
+ * block the handoff for good). After a hold, a turn that is running defers the clear to the next turn end.
+ */
+async function holdForReply(
+  host: HandoffHost, gate: NonNullable<StepContext['replyGate']>, sessionId: string, log: (text: string) => Promise<void>,
+): Promise<GateOutcome> {
+  let held = false;
+  let lastPromptAt: number | undefined;
+  for (let round = 0; round <= GATE_MAX_ROUNDS; round++) {
+    let read: TailRead;
+    try { read = await gate.read(sessionId); } catch (error) { read = { ok: false, error: String((error as { message?: unknown } | undefined)?.message ?? error).slice(0, 120) }; }
+    if (!read.ok) {
+      await log(`handoff: reply gate could not read the transcript (${read.error}); the clear goes without the hold`);
+      return { kind: 'go', held: false };
+    }
+    const view = analyzeTail(read.records);
+    lastPromptAt = view.lastPromptAt;
+    let now: number;
+    try { now = await host.clock.now(); } catch { return { kind: 'go', held: false }; }
+    const wait = gateWait(view, now, gate.minMs);
+    if (wait <= 0) {
+      if (!held) return { kind: 'go', held: false };
+      if (view.busy) {
+        await log('handoff: clear deferred after the hold, a turn is running; the next turn end retries it');
+        return { kind: 'defer', held: true, lastPromptAt };
+      }
+      await log(`handoff: clear goes, last reply to the user at ${clockText(view.anchorAt!)} is ${Math.round((now - view.anchorAt!) / 1000)} s old`);
+      return { kind: 'go', held: true, lastPromptAt };
+    }
+    held = true;
+    await log(`handoff: clear held ${Math.ceil(wait / 1000)} s: last reply to the user at ${clockText(view.anchorAt!)}`);
+    const slept = await sleepSliced(host, sessionId, wait + 500);
+    if (slept === 'changed') return { kind: 'abort', held: true };
+    if (slept === 'nosleep') {
+      await log('handoff: reply gate cannot sleep on this host; the clear goes without the rest of the hold');
+      return { kind: 'go', held: true, lastPromptAt };
+    }
+  }
+  await log(`handoff: reply gate restarted ${GATE_MAX_ROUNDS} times; the clear goes`);
+  return { kind: 'go', held: true, lastPromptAt };
+}
 
 /** 0.5.17: after typing `/clear`, how long the session id gets to change, and how often it is read. */
 export const CONSOLE_CONFIRM_MS = 30_000;
@@ -437,12 +511,35 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
         try {
           await pause(host);
           if (await host.session.id() !== sessionId) return;
+          // 0.5.25: a reply to the User stays visible replyVisibleMinMs before the clear.
+          let gate: GateOutcome = { kind: 'go', held: false };
+          if (ctx.replyGate && ctx.replyGate.minMs > 0) {
+            gate = await holdForReply(host, ctx.replyGate, sessionId, log);
+            if (gate.kind !== 'go') return;
+            if (await host.session.id() !== sessionId) return;
+          }
           // The file may have changed since the hook queued this work. Revalidate
           // after the detached delay; a stale/incomplete/missing file never clears.
           const fresh = await checkAny(state.orderAt!);
           if (!fresh.ok) {
             await log(`handoff changed before clear (${fresh.reason}); context retained`);
             return;
+          }
+          // 0.5.25: the file was written before the wait. A prompt that came during it (his own, a peer's,
+          // a task notification) is work the file does not know. Ask for a fresh file; its turn end clears.
+          if (gate.held && gate.lastPromptAt !== undefined && gate.lastPromptAt > fresh.mtimeMs) {
+            const again = await load(host, sessionId);
+            if ((again.refreshes ?? 0) < MAX_STALE_REFRESHES) {
+              again.refreshes = (again.refreshes ?? 0) + 1;
+              again.forcedOrders = Math.max(again.forcedOrders, 1);
+              again.orderAt = await host.clock.now();
+              await save(host, sessionId, again);
+              await log(`handoff: ${latest} is older than a prompt that came during the reply wait (file ${clockText(fresh.mtimeMs)}, prompt ${clockText(gate.lastPromptAt)}); ordering a fresh handoff (${again.refreshes} of ${MAX_STALE_REFRESHES})`);
+              await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: again.forcedOrders, reason: again.forceReason, window: windowNote(config) });
+              queueOrder(nowOrder(visible, config, latest, again.forceReason));
+              return;
+            }
+            await log(`handoff: ${latest} is older than a prompt that came during the reply wait and ${MAX_STALE_REFRESHES} refreshes were spent; clearing from the file as it is`);
           }
           // resumed.json first: the SessionStart hook skips a file this names.
           await host.fs.write(sessionFile(activeDir, sessionId, 'resumed.json'), JSON.stringify({
