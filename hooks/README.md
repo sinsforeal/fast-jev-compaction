@@ -73,6 +73,7 @@ Release 0.5.13 declares these `userConfig` values in
 | `handoffForceAt` | `300000` |
 | `handoffDir` | `var/handoffs` (relative = per tree, cwd captured on the session's first compaction or turn-complete callback and cached, so a later `cd` never moves it; absolute = shared root) |
 | `handoffSkillPath` | `docs/HANDOFF_SKILL.md` (relative paths resolve like `handoffDir`) |
+| `replyVisibleMinMs` | `600000` (a reply to the User stays visible this long before the handoff clear; 0 = off) |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -132,6 +133,12 @@ clear, then validates the file and checks the session id immediately before
 `$.command.run`. A changed session or a replacement with different mtime/size
 retains context, even when the file still ends in COMPLETE. The resumed marker
 can exist after these final checks reject clear; it is not proof of a clear.
+0.5.25: before that final check the detached work holds the clear until the last
+reply to the User is `replyVisibleMinMs` old (default 600000, 0 = off); the rules
+and the transcript record kinds are in `reply-gate.ts`. Only a turn that started
+with his own message counts; the sleeps are the host's `clock.sleep`, so the
+session stays free. An unreadable transcript lets the clear go (WARNING line once
+per session).
 Missing/unreadable clear capability blocks
 clear; clear failures stop at 3 attempts. No failure authorizes a summary or a
 RESUME without a successful clear. After clear, the machine follows any changed
@@ -177,7 +184,7 @@ The UI diagnostics themselves are not sent as model context. All receipts remain
 in `~/.claude/fast-jev-compaction.log`; log failures never alter the cut.
 
 The first registered callback per session writes a disk-only `module-loaded`
-receipt with `hook=fast-jev-compaction@0.5.24/forced-handoff-floor`, the full session
+receipt with `hook=fast-jev-compaction@0.5.25/forced-handoff-floor`, the full session
 id and `DISABLE_AUTO_COMPACT=1|unset|other|unreadable`. It never logs an arbitrary
 environment value or error. Registration alone writes nothing; callback reload
 may emit a new receipt for the same session. Require a fresh intended-session
