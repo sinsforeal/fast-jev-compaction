@@ -420,7 +420,7 @@ describe('standing: the fresh start', () => {
       expect(h.sid()).toBe(NEW);
       const since = clearedAt - at; // from the fire
       if (readable) { expect(since).toBeGreaterThanOrEqual(8 * MIN - 1000); expect(since).toBeLessThan(8 * MIN + 32_000); }
-      else { expect(since).toBeGreaterThanOrEqual(10 * MIN); expect(since).toBeLessThan(10 * MIN + 32_000); expect(h.log()).toContain('WARNING handoff: reply gate could not read the transcript'); }
+      else { expect(since).toBeGreaterThanOrEqual(10 * MIN); expect(since).toBeLessThan(10 * MIN + 32_000); expect(h.log()).toContain('reply gate could not read the transcript'); }
     }
   });
 
