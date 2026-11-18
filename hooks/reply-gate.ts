@@ -255,12 +255,12 @@ export const HOST_READ_MAX_BYTES = 256_000_000;
  * dropped. Throws when the host has no read, the file is too big or the read fails; readTail catches.
  */
 export async function readTailHostFs(host: TailHost, path: string, bytes: number = TAIL_BYTES): Promise<Slim[]> {
-  if (!host.fs.read) throw new Error('host has no fs.read');
-  if (host.fs.stat) {
-    const size = (await host.fs.stat(path)).size;
-    if (size > HOST_READ_MAX_BYTES) throw new Error(`transcript is ${size} bytes, over the ${HOST_READ_MAX_BYTES} host read cap`);
-  }
-  const all = await host.fs.read(path);
+  // The hooks loader refuses a module that reads an event of `$` as a value (0.5.27: `if (host.fs.read)` did
+  // not load), and `host` here is `$`. So no existence test: call, and let a host without it throw.
+  let size = -1;
+  try { size = (await host.fs.stat!(path)).size; } catch { /* no stat on this host: the read decides */ }
+  if (size > HOST_READ_MAX_BYTES) throw new Error(`transcript is ${size} bytes, over the ${HOST_READ_MAX_BYTES} host read cap`);
+  const all = await host.fs.read!(path);
   const cut = all.length > bytes;
   const lines = (cut ? all.slice(all.length - bytes) : all).split('\n');
   const out: Slim[] = [];
@@ -290,9 +290,7 @@ export async function readTail(host: TailHost, input: { path: string; dir: strin
   if (nodeFs) {
     try { return { ok: true, records: readTailNode(nodeFs, input.path) }; } catch (error) { errors.push(`node:fs ${msg(error)}`); }
   } else errors.push('no node:fs');
-  if (host.fs.read) {
-    try { return { ok: true, records: await readTailHostFs(host, input.path) }; } catch (error) { errors.push(`$.fs ${msg(error)}`); }
-  }
+  try { return { ok: true, records: await readTailHostFs(host, input.path) }; } catch (error) { errors.push(`$.fs ${msg(error)}`); }
   const windows = onWindows() || WINDOWS_PATH.test(input.path);
   try {
     const env = { FJ_PATH: windows ? input.path.replace(/\//g, '\\') : input.path, FJ_TAIL: String(TAIL_BYTES) };

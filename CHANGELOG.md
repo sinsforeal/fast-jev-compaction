@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.28 - 2026-11-18
+
+- Fix: 0.5.27 did not load either. `readTail` and `readTailHostFs` (reply-gate.ts) receive `$` as `host` and tested `host.fs.read` and `host.fs.stat` for existence before calling them; the loader follows `$` into the function and refuses the read: `compiled line 225 `if (host.fs.read) {`: $.fs.read is used as a value`. Both are now called with no existence test; a host without them throws inside the route's own try and the next route runs.
+- `tests/host-loader-contract.test.ts`: new case, every `host.<noun>.<event>` in reply-gate.ts is a call.
+- The real gate is outside this repo: `python tools/jev_load_probe.py` (Meta_Orchestrator) starts one throwaway session on the installed version and reads the loader's verdict from its debug log. No session restarts onto a version before it prints `loaded`.
+
 ## 0.5.27 - 2026-11-18
 
 - Fix: 0.5.26 did not load. `buildReplyGate` (fast-jev.ts) held the host object in a second name (`const h = $ as ...`), and the Claude Code hooks loader refuses that: `compiled line 561 `const h = $;`: $ itself is bound to a name`. A refused module is no plugin at all. Three sessions restarted onto 0.5.26 at 17:20 (advisor, 8liq, analyst) ran without it until this version. `$` is now cast at each use.

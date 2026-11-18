@@ -116,6 +116,19 @@ describe('host loader contract', () => {
     }
   });
 
+  // 0.5.27: readTail(host = $) tested `host.fs.read` before calling it. The loader follows `$` into the callee:
+  // "compiled line 225 `if (host.fs.read) {`: $.fs.read is used as a value". In reply-gate.ts `host` is always `$`.
+  it('reply-gate.ts only ever calls an event of its host parameter', () => {
+    const lines = readFileSync(join(HOOKS_DIR, 'reply-gate.ts'), 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (COMMENT_LINE.test(line)) return;
+      const code = line.replace(/\/\/.*$/, '');
+      for (const match of code.matchAll(/\bhost\.[A-Za-z_]+\.[A-Za-z_]+(!?\()?/g)) {
+        expect(match[1], `reply-gate.ts:${i + 1}: ${line.trim()}`).toBeDefined();
+      }
+    });
+  });
+
   it('passes $ only to top-level functions, const functions or module imports in identifier calls', () => {
     for (const name of sources) {
       expect(hostHelperViolations(readFileSync(join(HOOKS_DIR, name), 'utf8')), name).toEqual([]);
