@@ -14,7 +14,8 @@
 
 import { carryColor, resolveColor, transcriptPath, type AgentColorRecord } from './color-carry.js';
 import { consoleClear, isStoppedRefusal, onWindows } from './console-clear.js';
-import { checkLatest, clearAvailable, handoffBlocking, sessionFile, waitForNewId, type HandoffHost } from './handoff.js';
+import { checkLatest, clearAvailable, handoffBlocking, holdForReply, sessionFile, waitForNewId, type HandoffHost } from './handoff.js';
+import type { TailRead } from './reply-gate.js';
 
 export const CACHE_TTL_MINUTES = 60;
 const MIN = 60_000;
@@ -60,14 +61,19 @@ export type StandingArm = {
   dir: string;
   /** After a clear changed the id: the new id takes the old id's handoff root. */
   onIdChanged?: (previous: string, id: string) => void;
+  /** 0.5.26: the reply-visible gate; the standing clear waits on it like the handoff clear does. Absent = no hold. */
+  replyGate?: { minMs: number; read: (sessionId: string) => Promise<TailRead> };
 };
 
-export function makeStandingArm(options: StandingOptions, dir: string, onIdChanged?: (previous: string, id: string) => void): StandingArm {
+export function makeStandingArm(
+  options: StandingOptions, dir: string, onIdChanged?: (previous: string, id: string) => void,
+  replyGate?: StandingArm['replyGate'],
+): StandingArm {
   return {
     minTokens: options.minTokens,
     userQuietMs: options.userQuietMinutes * MIN,
     coldBoundaryMs: Math.max(MIN, (CACHE_TTL_MINUTES - options.coldMarginMinutes) * MIN),
-    dir, onIdChanged,
+    dir, onIdChanged, ...(replyGate ? { replyGate } : {}),
   };
 }
 
@@ -355,6 +361,11 @@ async function standingClear(
     try { return await $.session.id() === sid; } catch { return false; }
   };
   try {
+    // 0.5.26: a reply to the User stays visible replyVisibleMinMs before this clear too (it had no gate in 0.5.25).
+    if (arm.replyGate && arm.replyGate.minMs > 0) {
+      const gate = await holdForReply($, arm.replyGate, sid, log);
+      if (gate.kind !== 'go') { await log(`standing: clear ${gate.kind === 'abort' ? 'aborted, the session id changed during the reply hold' : 'deferred after the reply hold'}`); return 'aborted'; }
+    }
     const fresh = await checkStanding($, path, sid, startActive);
     if (!fresh.ok || !(await unchanged())) { await log(`standing: clear aborted, ${fresh.ok ? 'activity or a new session id' : fresh.reason}`); return 'aborted'; }
     // resumed.json first: the SessionStart hook skips a file this names.

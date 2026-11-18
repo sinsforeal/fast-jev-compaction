@@ -41,7 +41,11 @@ function harness(flag: '1' | 'unset' | 'unreadable' | 'other' = '1', options = {
   const pauses: (() => void)[] = [];
   const handlers: Record<string, Function> = {};
   const install = () => register(((name: string, ...args: any[]) => { handlers[name] = args.at(-1); }) as any,
-    { apiKey: 'fixture', preserveRecentMessages: 1, targetVisibleTokens: 0, handoffDir: 'F:/h', ...options });
+    // replyVisibleMinMs 0: these tests are about the forced floor, the order, the clear and its retries, not the
+    // 10 min reply hold. With the hold on (the product default) the fake host has no readable transcript, the
+    // 0.5.26 gate fails closed and waits the full hold, and the test ends first. The hold has its own test
+    // below ('0.5.26 the registered clear waits...') that passes { replyVisibleMinMs: 600000 }.
+    { apiKey: 'fixture', preserveRecentMessages: 1, targetVisibleTokens: 0, handoffDir: 'F:/h', replyVisibleMinMs: 0, ...options });
   install();
   const put = (path: string, text: string, at = ++now) => { files.set(path, text); mtimes.set(path, at); };
   const $: any = {
@@ -96,7 +100,7 @@ function harness(flag: '1' | 'unset' | 'unreadable' | 'other' = '1', options = {
   const latest = `${root}/latest.md`;
   const good = `# Handoff for session ${initialSid}\nbody\nCOMPLETE\n`;
   return { $, files, mtimes, kinds, store, logs, core, cut, turn, append, flush, put, root, latest, good, handlers, sid: initialSid,
-    advance: (ms: number) => { now += ms; },
+    advance: (ms: number) => { now += ms; }, getNow: () => now, setNow: (value: number) => { now = value; },
     install, marker: () => JSON.parse(files.get(`${root}/order.json`)!),
     setRows: (value: Message[]) => { rows = value; }, getRows: () => rows,
     setTokens: (value: number | undefined) => { tokens = value; },
@@ -379,6 +383,39 @@ describe('registered forced handoff floor', () => {
     await h.turn(); await h.flush();
     expect(h.$.command.run).toHaveBeenCalledTimes(MAX_CLEAR_FAILURES + 1);
   });
+
+  it('0.5.26 the registered clear waits until the reply to the User is 10 min old (readable tail, fake clock)', async () => {
+    const h = harness('unset', { replyVisibleMinMs: 600_000 });
+    const T0 = Date.parse('2026-11-18T12:00:00Z');
+    h.setNow(T0);
+    await force(h);
+    h.put(h.latest, h.good);
+    const asked = h.getNow();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    // His typed message 5 min ago, the reply 3 min ago: both readable through the fake $.fs.
+    const user = `{"type":"user","timestamp":"${iso(asked - 300_000)}","origin":{"kind":"human"},"message":{"role":"user","content":"please look at this"}}`;
+    const reply = `{"type":"assistant","timestamp":"${iso(asked - 180_000)}","message":{"role":"assistant","content":[{"type":"text","text":"here is what I found"}]}}`;
+    // The turn has ended (turn_duration): an open turn would defer the clear to the next turn end instead.
+    const end = `{"type":"system","subtype":"turn_duration","timestamp":"${iso(asked - 170_000)}","durationMs":130000}`;
+    h.put('F:/temp/jev-floor/.claude/projects/F--tree/' + h.sid + '.jsonl', `${user}\n${reply}\n${end}\n`);
+    // The fake clock moves with each hold sleep; nothing waits in real time.
+    const slept: number[] = [];
+    h.$.clock.sleep = vi.fn(async (ms: number) => { slept.push(ms); h.advance(ms); });
+    let clearedAt: number | undefined;
+    h.$.command.run.mockImplementation(async () => { clearedAt = h.getNow(); return {}; });
+    await h.turn();
+    for (let i = 0; i < 6; i++) await h.flush();
+    expect(h.logs.some(line => line.includes('handoff: clear held 420 s: last reply to the user at'))).toBe(true);
+    expect(h.logs.some(line => line.includes('reply gate could not read the transcript'))).toBe(false);
+    expect(h.$.command.run).toHaveBeenCalledTimes(1);
+    const sleptTotal = slept.reduce((a, b) => a + b, 0); // 420 s of hold plus the 500 ms margin, less the fake clock's own ticks
+    expect(sleptTotal).toBeGreaterThanOrEqual(420_000);
+    expect(sleptTotal).toBeLessThanOrEqual(420_500);
+    // About 7 min after the request (the reply was 3 min old), never before the reply is 10 min old.
+    expect(clearedAt! - asked).toBeGreaterThanOrEqual(420_000);
+    expect(clearedAt! - asked).toBeLessThan(425_000);
+    expect(clearedAt! - (asked - 180_000)).toBeGreaterThanOrEqual(600_000);
+  });
 });
 
 describe('0.5.15 order delivery when the plugin own submit never reaches the model', () => {
@@ -435,7 +472,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.25/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.26/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');
