@@ -1,0 +1,3 @@
+WIP 0.5.26: reply hold reads the transcript through the host fs and fails closed
+
+Cause: log 2026-11-18T22:03:21Z [198c03d3] reply gate could not read the transcript (sh ENOENT); the gate failed open and Pick's handover clear came 70 s after the reply. Now readTail uses node:fs, then $.fs.read, then a helper (powershell for a drive-letter path); an unreadable tail waits the full minimum from the request; the standing clear goes through the gate; he is active when his last own message is under 30 min old. Version 0.5.26. WIP: one standing test assertion still wrong, CHANGELOG and README not written, typecheck not run. See docs/reports/NOTEBOOK_replyhold_20261118.md.

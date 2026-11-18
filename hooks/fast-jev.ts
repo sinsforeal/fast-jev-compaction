@@ -13,7 +13,7 @@ import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFail
 import { transcriptPath } from './color-carry.js';
 import { appendDiskLine } from './disk-log.js';
 import { consoleClear, onWindows } from './console-clear.js';
-import { readTail, type TailHost } from './reply-gate.js';
+import { readTail, type TailHost, type TailRead } from './reply-gate.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -60,7 +60,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.25/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.26/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -703,6 +703,29 @@ async function windowFor($: WindowHost, configured: HookConfig, roots: HandoffRo
   }
 }
 
+/**
+ * 0.5.25/0.5.26: the reply-visible gate for the handoff clear and the standing clear (one reader, one option).
+ * `read` never throws; undefined when replyVisibleMinMs is 0.
+ */
+function buildReplyGate(
+  $: unknown, configured: HookConfig, roots: HandoffRoots,
+): { minMs: number; read: (sessionId: string) => Promise<TailRead> } | undefined {
+  if (!(configured.replyVisibleMinMs > 0)) return undefined;
+  const h = $ as LogHost & CwdHost & { env: { get: (key: string) => Promise<string | undefined> } };
+  return {
+    minMs: configured.replyVisibleMinMs,
+    read: async id => {
+      try {
+        const home = (await h.env.get('USERPROFILE')) ?? (await h.env.get('HOME'));
+        const cwd = await resolvedCwd(h);
+        if (!home || !cwd) return { ok: false as const, error: 'no home or cwd for the transcript path' };
+        const dir = await roots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log(h, text));
+        return await readTail($ as TailHost, { path: transcriptPath(home, cwd, id), dir });
+      } catch { return { ok: false as const, error: 'transcript path could not be resolved' }; }
+    },
+  };
+}
+
 /** Arms (or clears) the idle warm for a session with the per-tree config in force right now. Never throws. */
 async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roots: HandoffRoots, sid: string, state: WindowState, warm: WarmState, epoch?: number): Promise<void> {
   try {
@@ -713,7 +736,7 @@ async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roo
     if (win.standing && configured.handoffDir) {
       try {
         const dir = await roots.resolve(cwd, sid, configured.handoffDir, text => log($, text));
-        arm = makeStandingArm(win.standing, dir, (previous, id) => roots.seed(previous, id));
+        arm = makeStandingArm(win.standing, dir, (previous, id) => roots.seed(previous, id), buildReplyGate($, configured, roots));
         await standingPersistUser($ as unknown as { store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } }, warm.standing, sid);
       } catch { arm = undefined; }
     }
@@ -1129,18 +1152,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
             return home && cwd ? transcriptPath(home, cwd, id) : undefined;
           },
           // 0.5.25: a reply to the User stays visible replyVisibleMinMs before the clear (0 = off).
-          replyGate: configured.replyVisibleMinMs > 0 ? {
-            minMs: configured.replyVisibleMinMs,
-            read: async id => {
-              try {
-                const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
-                const cwd = await resolvedCwd($);
-                if (!home || !cwd) return { ok: false as const, error: 'no home or cwd for the transcript path' };
-                const dir = await handoffRoots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log($, text));
-                return await readTail($ as unknown as TailHost, { path: transcriptPath(home, cwd, id), dir });
-              } catch { return { ok: false as const, error: 'transcript path could not be resolved' }; }
-            },
-          } : undefined,
+          replyGate: buildReplyGate($, configured, handoffRoots),
         });
       } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }

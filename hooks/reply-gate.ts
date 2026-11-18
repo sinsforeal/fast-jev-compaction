@@ -22,7 +22,8 @@
  *   interrupt        type user, no origin, text "[Request interrupted by user]"
  *   turn end         type system, subtype turn_duration
  *
- * Nothing here throws. Anything unreadable comes back as `{ ok: false }` and the caller lets the clear go.
+ * Nothing here throws. Anything unreadable comes back as `{ ok: false }`; since 0.5.26 the caller then holds
+ * the clear for the full minimum from the time it was asked (fails closed), where 0.5.25 let it go at once.
  */
 
 import { onWindows } from './console-clear.js';
@@ -132,7 +133,12 @@ export function classifyUser(rec: Slim): UserKind {
   return 'his'; // an older transcript: a plain, non-meta user prompt is a person
 }
 
+/** 0.5.26: he is "active there" when his own last message (typed, pick-assist or feed channel) is younger than this. */
+export const HIS_ACTIVE_MS = 30 * 60_000;
+
 export type TailView = {
+  /** 0.5.26: time of his newest own message (typed, pick-assist or feed channel). */
+  hisAt?: number;
   /** Time of the last assistant text in the newest turn that his message started. */
   replyAt?: number;
   /** replyAt, or the time of his message when that turn has no reply yet. Undefined = no turn of his in the window. */
@@ -163,14 +169,18 @@ export function analyzeTail(records: readonly Slim[]): TailView {
     lastPromptAt = rec.t;
   }
   const view: TailView = { busy, count: records.length };
-  if (lastHis) { view.anchorAt = lastHis.replyAt ?? lastHis.startedAt; if (lastHis.replyAt !== undefined) view.replyAt = lastHis.replyAt; }
+  if (lastHis) { view.anchorAt = lastHis.replyAt ?? lastHis.startedAt; view.hisAt = lastHis.startedAt; if (lastHis.replyAt !== undefined) view.replyAt = lastHis.replyAt; }
   if (lastPromptAt !== undefined) view.lastPromptAt = lastPromptAt;
   return view;
 }
 
-/** Milliseconds the clear still has to wait: 0 when the gate is off, no turn of his is in the view, or the reply is old enough. */
-export function gateWait(view: TailView, now: number, minMs: number): number {
+/**
+ * Milliseconds the clear still has to wait: 0 when the gate is off, no turn of his is in the view, he is not
+ * active there (his last own message is older than `activeMs`), or the reply is old enough.
+ */
+export function gateWait(view: TailView, now: number, minMs: number, activeMs: number = HIS_ACTIVE_MS): number {
   if (!(minMs > 0) || view.anchorAt === undefined) return 0;
+  if (view.hisAt !== undefined && now - view.hisAt > activeMs) return 0;
   const age = Math.max(0, now - view.anchorAt);
   return age >= minMs ? 0 : minMs - age;
 }
@@ -183,7 +193,12 @@ export function clockText(ms: number): string {
 }
 
 export type TailHost = {
-  fs: { write: (path: string, text: string) => Promise<void> };
+  /** `read` and `stat` are the host's own file API (0.5.26 reads the transcript with them); both optional so older stand-ins still fit. */
+  fs: {
+    write: (path: string, text: string) => Promise<void>;
+    read?: (path: string) => Promise<string>;
+    stat?: (path: string) => Promise<{ kind: string; size: number; mtimeMs: number }>;
+  };
   process: { run: (argv: readonly string[], init?: { timeoutMs?: number; env?: Record<string, string> }) => Promise<{ exitCode: number; stdout?: string }> };
 };
 
@@ -236,20 +251,58 @@ export function readTailNode(fs: NodeFsLike, path: string, bytes: number = TAIL_
   } finally { fs.closeSync(fd); }
 }
 
+/** Whole-file reads through the host are refused above this size (the string would be held in the plugin). */
+export const HOST_READ_MAX_BYTES = 256_000_000;
+
 /**
- * Reads the transcript tail. First choice: node:fs inside the plugin process (`nodeFs`, default the host's
- * own, or null to skip). If the host has no node:fs or it throws: a child process, so the plugin only holds
- * the kept records. Windows: a hidden PowerShell helper written next to the handoff files. Elsewhere: tail +
- * grep. Never throws.
+ * 0.5.26: reads the tail through the host's own `$.fs` (stat, then read), no child process and no shell. The
+ * host hands back the whole file as a string; the last `bytes` characters are kept and the first, cut line is
+ * dropped. Throws when the host has no read, the file is too big or the read fails; readTail catches.
+ */
+export async function readTailHostFs(host: TailHost, path: string, bytes: number = TAIL_BYTES): Promise<Slim[]> {
+  if (!host.fs.read) throw new Error('host has no fs.read');
+  if (host.fs.stat) {
+    const size = (await host.fs.stat(path)).size;
+    if (size > HOST_READ_MAX_BYTES) throw new Error(`transcript is ${size} bytes, over the ${HOST_READ_MAX_BYTES} host read cap`);
+  }
+  const all = await host.fs.read(path);
+  const cut = all.length > bytes;
+  const lines = (cut ? all.slice(all.length - bytes) : all).split('\n');
+  const out: Slim[] = [];
+  for (let i = cut ? 1 : 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.length < 20) continue;
+    const rec = slimLine(line);
+    if (rec) out.push(rec);
+  }
+  return out;
+}
+
+const WINDOWS_PATH = /^[A-Za-z]:[\\/]/;
+const msg = (error: unknown): string => String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 120);
+
+/**
+ * Reads the transcript tail, first route that works wins:
+ *   1. node:fs inside the plugin process (`nodeFs`, default the host's own, or null to skip);
+ *   2. 0.5.26: the host's own `$.fs.read` (no shell; this is the route that works where `process` is not visible);
+ *   3. a child process, so the plugin only holds the kept records. A Windows path (drive letter) or a
+ *      win32 process: a hidden PowerShell helper written next to the handoff files. Elsewhere: tail + grep.
+ * 0.5.25 tried 1 and 3 only and chose `sh` on a Windows host whose plugin sandbox hides `process.platform`
+ * (log 2026-11-18T22:03:21Z, session 198c03d3): the read failed and the gate let the clear go. Never throws.
  */
 export async function readTail(host: TailHost, input: { path: string; dir: string }, nodeFs: NodeFsLike | null | undefined = hostNodeFs()): Promise<TailRead> {
+  const errors: string[] = [];
   if (nodeFs) {
-    try { return { ok: true, records: readTailNode(nodeFs, input.path) }; } catch { /* fall through to the helper */ }
+    try { return { ok: true, records: readTailNode(nodeFs, input.path) }; } catch (error) { errors.push(`node:fs ${msg(error)}`); }
+  } else errors.push('no node:fs');
+  if (host.fs.read) {
+    try { return { ok: true, records: await readTailHostFs(host, input.path) }; } catch (error) { errors.push(`$.fs ${msg(error)}`); }
   }
+  const windows = onWindows() || WINDOWS_PATH.test(input.path);
   try {
-    const env = { FJ_PATH: onWindows() ? input.path.replace(/\//g, '\\') : input.path, FJ_TAIL: String(TAIL_BYTES) };
+    const env = { FJ_PATH: windows ? input.path.replace(/\//g, '\\') : input.path, FJ_TAIL: String(TAIL_BYTES) };
     let argv: string[];
-    if (onWindows()) {
+    if (windows) {
       const script = nativeJoin(input.dir, 'reply-tail.ps1');
       await host.fs.write(script, TAIL_HELPER_PS1);
       argv = ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script];
@@ -257,11 +310,11 @@ export async function readTail(host: TailHost, input: { path: string; dir: strin
       argv = ['sh', '-c', `tail -c "$FJ_TAIL" "$FJ_PATH" | grep -a -E '"type":"(user|assistant|system)"' | grep -a -v '"type":"tool_result"' | grep -a -E '"type":"user"|"type":"text"|"subtype":"turn_duration"'`];
     }
     const out = await host.process.run(argv, { timeoutMs: 60_000, env });
-    if (out.exitCode === 1 && !onWindows()) return { ok: true, records: [] }; // grep: no match
-    if (out.exitCode !== 0) return { ok: false, error: `tail helper exited ${out.exitCode}` };
+    if (out.exitCode === 1 && !windows) return { ok: true, records: [] }; // grep: no match
+    if (out.exitCode !== 0) return { ok: false, error: `${errors.join('; ')}; tail helper exited ${out.exitCode}`.slice(0, 300) };
     return { ok: true, records: parseTail(out.stdout) };
   } catch (error) {
-    return { ok: false, error: String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 160) };
+    return { ok: false, error: `${errors.join('; ')}; helper ${msg(error)}`.slice(0, 300) };
   }
 }
 

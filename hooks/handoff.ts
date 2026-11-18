@@ -276,7 +276,7 @@ export type StepContext = {
   replyGate?: { minMs: number; read: (sessionId: string) => Promise<TailRead> };
 };
 
-type GateOutcome = { kind: 'go' | 'defer' | 'abort'; held: boolean; lastPromptAt?: number };
+export type GateOutcome = { kind: 'go' | 'defer' | 'abort'; held: boolean; lastPromptAt?: number };
 
 /** Sleeps `ms` in slices; false when the session id changed meanwhile or the host cannot sleep. */
 async function sleepSliced(host: HandoffHost, sessionId: string, ms: number): Promise<'ok' | 'changed' | 'nosleep'> {
@@ -294,24 +294,46 @@ async function sleepSliced(host: HandoffHost, sessionId: string, ms: number): Pr
  * 0.5.25: holds the clear while the last reply to the User is younger than the gate. Runs inside the detached
  * clear work, so the session stays free: the sleeps are the host's own timer, not a loop on the turn.
  * Every round re-reads the transcript, so a new reply to him restarts the clock and a reply to a peer or a
- * task notification does not move it. An unreadable transcript lets the clear go (a broken read must never
- * block the handoff for good). After a hold, a turn that is running defers the clear to the next turn end.
+ * task notification does not move it. 0.5.26: an unreadable transcript fails closed: the clear waits the full
+ * minimum from the time it was asked, logs why, re-reads once after the wait, and only then goes (a broken
+ * read never blocks the handoff for good, but it never clears early either; 0.5.25 cleared at once, which
+ * cut Pick's reply at 17:03 on 2026-11-18). After a hold, a turn that is running defers the clear to the
+ * next turn end. Every clear the plugin makes (handoff clear, its retries, the standing clear) runs this.
  */
-async function holdForReply(
+export async function holdForReply(
   host: HandoffHost, gate: NonNullable<StepContext['replyGate']>, sessionId: string, log: (text: string) => Promise<void>,
 ): Promise<GateOutcome> {
   let held = false;
   let lastPromptAt: number | undefined;
+  let askedAt: number | undefined;
+  try { askedAt = await host.clock.now(); } catch { askedAt = undefined; }
+  let blindWaited = false;
   for (let round = 0; round <= GATE_MAX_ROUNDS; round++) {
     let read: TailRead;
     try { read = await gate.read(sessionId); } catch (error) { read = { ok: false, error: String((error as { message?: unknown } | undefined)?.message ?? error).slice(0, 120) }; }
     if (!read.ok) {
       // A failing reader must not turn the feature off unseen: one WARNING line per session, then a plain line.
+      const mins = Math.round(gate.minMs / 60_000 * 10) / 10;
+      const text = `reply gate could not read the transcript (${read.error}); ${blindWaited ? 'the full wait is spent, the clear goes' : `holding the clear the full ${mins} min from the request`}`;
       if (!gateReadWarned.has(sessionId)) {
         gateReadWarned.add(sessionId);
-        await log(`WARNING handoff: reply gate could not read the transcript (${read.error}); the 10 min reply hold is OFF while this fails, the clear goes without it`);
-      } else await log(`handoff: reply gate could not read the transcript (${read.error}); the clear goes without the hold`);
-      return { kind: 'go', held, lastPromptAt };
+        await log(`WARNING handoff: ${text}`);
+      } else await log(`handoff: ${text}`);
+      if (blindWaited) return { kind: 'go', held, lastPromptAt };
+      let now: number;
+      try { now = await host.clock.now(); } catch { return { kind: 'go', held, lastPromptAt }; }
+      const left = Math.max(0, gate.minMs - (askedAt === undefined ? 0 : now - askedAt));
+      blindWaited = true;
+      if (left > 0) {
+        held = true;
+        const slept = await sleepSliced(host, sessionId, left);
+        if (slept === 'changed') return { kind: 'abort', held: true };
+        if (slept === 'nosleep') {
+          await log('handoff: reply gate cannot sleep on this host; the clear goes without the rest of the hold');
+          return { kind: 'go', held: true, lastPromptAt };
+        }
+      }
+      continue; // one more read: a readable transcript decides; an unreadable one clears now
     }
     const view = analyzeTail(read.records);
     lastPromptAt = view.lastPromptAt;

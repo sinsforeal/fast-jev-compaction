@@ -268,25 +268,56 @@ describe('0.5.25 the clear waits for a visible reply to him', () => {
     expect(none.state.clearedAt! - T0).toBeLessThan(1000);
   });
 
-  it('an unreadable transcript never blocks the clear, and warns once per session', async () => {
+  it('0.5.26 an unreadable transcript fails closed: the full minimum from the request, then the clear; warns once per session', async () => {
     const r = rig([], { unreadable: true });
     await r.order(); await r.step();
     expect(r.clearCalls()).toBe(1);
-    expect(r.state.clearedAt! - T0).toBeLessThan(1000);
-    // a second cycle in the same session
-    await r.order(T0 + MIN, T0 + 2 * MIN); r.setNow(T0 + 3 * MIN); await r.step();
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 + 10 * MIN);
+    expect(r.state.clearedAt!).toBeLessThan(T0 + 10 * MIN + 31_000);
+    // a second cycle in the same session, asked at T0 + 20 min
+    r.setNow(T0 + 20 * MIN); await r.order(T0 + 19 * MIN, T0 + 20 * MIN - 1000); await r.step();
     expect(r.clearCalls()).toBe(2);
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 + 30 * MIN);
     const unreadable = r.logs.filter(l => l.includes('reply gate could not read the transcript'));
-    expect(unreadable).toHaveLength(2);
+    expect(unreadable).toHaveLength(4); // per cycle: the hold line, then the "wait is spent" line
     expect(unreadable.filter(l => l.startsWith('WARNING'))).toHaveLength(1);
-    expect(unreadable[0]).toMatch(/^WARNING handoff: .*fixture: unreadable/);
+    expect(unreadable[0]).toMatch(/^WARNING handoff: .*fixture: unreadable.*holding the clear the full 10 min from the request/);
+    expect(unreadable[1]).toContain('the full wait is spent, the clear goes');
   });
 
-  it('a read that throws counts as unreadable', async () => {
+  it('0.5.26 a read that throws counts as unreadable and holds the full minimum', async () => {
     const r = rig([]);
     await r.order(); await r.step({ minMs: 10 * MIN, read: async () => { throw new Error('boom'); } });
     expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 + 10 * MIN);
     expect(r.logs.some(l => l.startsWith('WARNING') && l.includes('boom'))).toBe(true);
+  });
+
+  it('0.5.26 after the blind wait a readable transcript decides: a reply 1 min old keeps holding', async () => {
+    const r = rig([]);
+    let calls = 0;
+    let at = 0;
+    const read = async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false as const, error: 'first read failed' };
+      if (!at) { at = r.now() - MIN; r.put(r.latest, r.good, at + 600); } // he got a reply during the blind wait; the model refreshed the file after it
+      return { ok: true as const, records: parseTail([his(at - 5000), reply(at), end(at + 500)].join('\n')) };
+    };
+    await r.order(); await r.step({ minMs: 10 * MIN, read });
+    r.put(r.latest, r.good, at + 600); // the model refreshed the handoff after that reply
+    expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 + 19 * MIN); // 10 blind + 9 more for the new reply
+    expect(r.logs.some(l => l.includes('clear held'))).toBe(true);
+  });
+
+  it('0.5.26 he is not active there (his last message over 30 min old): no hold', async () => {
+    const r = rig(hisTurn(T0 - 45 * MIN, T0 - 2 * MIN));
+    await r.order(); await r.step();
+    expect(r.state.clearedAt! - T0).toBeLessThan(1000);
+    const view = analyzeTail(parseTail(hisTurn(T0 - 45 * MIN, T0 - 2 * MIN).join('\n')));
+    expect(view.hisAt).toBe(T0 - 45 * MIN);
+    expect(gateWait(view, T0, 10 * MIN)).toBe(0);
+    expect(gateWait(view, T0, 10 * MIN, 60 * MIN)).toBe(8 * MIN);
   });
 
   it('a stop-hook feedback companion keeps the turn his and uses the final reply time', async () => {
@@ -298,6 +329,92 @@ describe('0.5.25 the clear waits for a visible reply to him', () => {
     expect(r.clearCalls()).toBe(1);
     expect(r.state.clearedAt!).toBeGreaterThanOrEqual(finalReply + 10 * MIN);
     expect(r.state.clearedAt!).toBeLessThan(finalReply + 10 * MIN + 31_000);
+  });
+});
+
+// Records as they sit in the real tail of Pick's session 198c03d3 (2026-11-18, read 17:09 local).
+const toolUse = (t: number): string => JSON.stringify({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] }, timestamp: iso(t) });
+const stopHook = (t: number): string => JSON.stringify({ type: 'system', subtype: 'stop_hook_summary', timestamp: iso(t) });
+const queueOp = (t: number): string => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: iso(t) });
+
+describe('0.5.26 the Pick 11-18 tail replayed on a fake clock', () => {
+  /** The tail around the incident: his reply at `replyAt`, the plugin's HANDOFF NOW 2 s later, the handoff turn, the clear asked at T0. */
+  const incident = (prompt: string, replyAt: number): string[] => [
+    channel(replyAt - 5 * MIN, 'peer'), reply(replyAt - 5 * MIN + 4000, 'peer answer'), end(replyAt - 5 * MIN + 5000),
+    prompt, reply(replyAt, 'Her tiny is merged to master.'), stopHook(replyAt + 500), end(replyAt + 900),
+    pluginPrompt(replyAt + 2000), toolUse(replyAt + 20_000), toolResult(replyAt + 21_000), toolUse(replyAt + 40_000),
+    queueOp(T0 - 1000), reply(T0 - 2000, 'The handoff is written to latest.md. The session clears and resumes.'),
+    stopHook(T0 - 1500), end(T0 - 1000),
+  ];
+
+  it('typed words, reply 70 s before the clear request: the gate waits the other 8 min 50 s', async () => {
+    const replyAt = T0 - 70_000;
+    const r = rig(incident(his(replyAt - 116_000, 'I am confused on why we are missing days'), replyAt));
+    await r.order(); await r.step();
+    expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt! - T0).toBeGreaterThanOrEqual(8 * MIN + 50_000);
+    expect(r.state.clearedAt! - T0).toBeLessThan(9 * MIN + 21_000);
+    expect(r.logs.some(l => /clear held 5\d\d s: last reply to the user at/.test(l))).toBe(true);
+  });
+
+  it('pick-assist words, reply 3 min before the clear request: the gate waits about 7 more minutes', async () => {
+    const replyAt = T0 - 3 * MIN;
+    const r = rig(incident(channel(replyAt - 20_000, 'pick-assist'), replyAt));
+    await r.order(); await r.step();
+    expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt! - T0).toBeGreaterThanOrEqual(7 * MIN);
+    expect(r.state.clearedAt! - T0).toBeLessThan(7 * MIN + 31_000);
+  });
+
+  it('feed words the same; a peer message as the last prompt before the reply holds nothing', async () => {
+    const replyAt = T0 - 3 * MIN;
+    const feed = rig(incident(channel(replyAt - 20_000, 'feed'), replyAt));
+    await feed.order(); await feed.step();
+    expect(feed.state.clearedAt! - T0).toBeGreaterThanOrEqual(7 * MIN);
+    const peer = rig([channel(T0 - 3 * MIN - 20_000, 'peer'), reply(T0 - 3 * MIN, 'sent'), end(T0 - 3 * MIN + 500)]);
+    await peer.order(); await peer.step();
+    expect(peer.state.clearedAt! - T0).toBeLessThan(1000);
+  });
+});
+
+describe('0.5.26 readTail without a shell', () => {
+  const lines = [his(T0 - 30_000), reply(T0 - 20_000), end(T0 - 19_000)].join('\n') + '\n';
+  const mkHost = (over: Partial<TailHost['fs']> = {}, run: TailHost['process']['run'] = async () => { throw new Error("Command 'sh' not found"); }): TailHost =>
+    ({ fs: { write: vi.fn(async () => {}), read: vi.fn(async () => lines), stat: vi.fn(async () => ({ kind: 'file', size: lines.length, mtimeMs: 0 })), ...over }, process: { run: vi.fn(run) } as TailHost['process'] });
+
+  it('reads through the host file API when node fs and process are both unusable (the Pick 11-18 host)', async () => {
+    const h = mkHost();
+    const out = await readTail(h, { path: 'C:/Users/x/.claude/projects/F--t/s.jsonl', dir: 'F:/h' }, null);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.records.map(r => r.r)).toEqual(['u', 'a', 'e']);
+    expect(h.process.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps only the last window of a big file and drops the cut first line', async () => {
+    const big = [his(T0 - 90_000), reply(T0 - 80_000), his(T0 - 30_000), reply(T0 - 20_000)].join('\n') + '\n';
+    const h = mkHost({ read: async () => big });
+    const recs = await (await import('../hooks/reply-gate.ts')).readTailHostFs(h, 'x', reply(T0 - 20_000).length + 2 + 10);
+    expect(recs.map(r => r.r)).toEqual(['a']); // the window starts inside the his(T0-30s) line, which is cut and dropped
+  });
+
+  it('a Windows path never picks sh: the helper is powershell even where process.platform is hidden', async () => {
+    const h = mkHost({ read: undefined }, async () => ({ exitCode: 0, stdout: '' }));
+    await readTail(h, { path: 'C:/Users/x/s.jsonl', dir: 'F:/h' }, null);
+    const argv = (h.process.run as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string[];
+    expect(argv[0]).toBe('powershell');
+  });
+
+  it('every route failing comes back not ok with the reasons, never throws', async () => {
+    const h = mkHost({ read: async () => { throw new Error('EPERM outside the tree'); } });
+    const out = await readTail(h, { path: 'C:/x/s.jsonl', dir: 'F:/h' }, null);
+    expect(out).toMatchObject({ ok: false, error: expect.stringMatching(/\$\.fs EPERM outside the tree.*helper/) });
+  });
+
+  it('a file over the host read cap is refused before it is read', async () => {
+    const h = mkHost({ stat: async () => ({ kind: 'file', size: 999_000_000, mtimeMs: 0 }) });
+    const out = await readTail(h, { path: 'C:/x/s.jsonl', dir: 'F:/h' }, null);
+    expect(out.ok).toBe(false);
+    expect(h.fs.read).not.toHaveBeenCalled();
   });
 });
 
