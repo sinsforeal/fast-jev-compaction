@@ -310,14 +310,14 @@ describe('0.5.25 the clear waits for a visible reply to him', () => {
     expect(r.logs.some(l => l.includes('clear held'))).toBe(true);
   });
 
-  it('0.5.26 he is not active there (his last message over 30 min old): no hold', async () => {
+  it('0.5.26 a long turn of his (message 45 min old, reply 2 min old) is held like any other', async () => {
     const r = rig(hisTurn(T0 - 45 * MIN, T0 - 2 * MIN));
     await r.order(); await r.step();
-    expect(r.state.clearedAt! - T0).toBeLessThan(1000);
+    expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 + 8 * MIN);
+    expect(r.state.clearedAt!).toBeLessThan(T0 + 8 * MIN + 31_000);
     const view = analyzeTail(parseTail(hisTurn(T0 - 45 * MIN, T0 - 2 * MIN).join('\n')));
-    expect(view.hisAt).toBe(T0 - 45 * MIN);
-    expect(gateWait(view, T0, 10 * MIN)).toBe(0);
-    expect(gateWait(view, T0, 10 * MIN, 60 * MIN)).toBe(8 * MIN);
+    expect(gateWait(view, T0, 10 * MIN)).toBe(8 * MIN);
   });
 
   it('a stop-hook feedback companion keeps the turn his and uses the final reply time', async () => {

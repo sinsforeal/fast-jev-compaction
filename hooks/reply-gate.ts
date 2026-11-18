@@ -133,12 +133,7 @@ export function classifyUser(rec: Slim): UserKind {
   return 'his'; // an older transcript: a plain, non-meta user prompt is a person
 }
 
-/** 0.5.26: he is "active there" when his own last message (typed, pick-assist or feed channel) is younger than this. */
-export const HIS_ACTIVE_MS = 30 * 60_000;
-
 export type TailView = {
-  /** 0.5.26: time of his newest own message (typed, pick-assist or feed channel). */
-  hisAt?: number;
   /** Time of the last assistant text in the newest turn that his message started. */
   replyAt?: number;
   /** replyAt, or the time of his message when that turn has no reply yet. Undefined = no turn of his in the window. */
@@ -169,18 +164,18 @@ export function analyzeTail(records: readonly Slim[]): TailView {
     lastPromptAt = rec.t;
   }
   const view: TailView = { busy, count: records.length };
-  if (lastHis) { view.anchorAt = lastHis.replyAt ?? lastHis.startedAt; view.hisAt = lastHis.startedAt; if (lastHis.replyAt !== undefined) view.replyAt = lastHis.replyAt; }
+  if (lastHis) { view.anchorAt = lastHis.replyAt ?? lastHis.startedAt; if (lastHis.replyAt !== undefined) view.replyAt = lastHis.replyAt; }
   if (lastPromptAt !== undefined) view.lastPromptAt = lastPromptAt;
   return view;
 }
 
 /**
- * Milliseconds the clear still has to wait: 0 when the gate is off, no turn of his is in the view, he is not
- * active there (his last own message is older than `activeMs`), or the reply is old enough.
+ * Milliseconds the clear still has to wait: 0 when the gate is off, no turn of his is in the view, or the reply
+ * is old enough. The age of his own message never shortens it: a reply that ends a long turn he started is held
+ * like any other.
  */
-export function gateWait(view: TailView, now: number, minMs: number, activeMs: number = HIS_ACTIVE_MS): number {
+export function gateWait(view: TailView, now: number, minMs: number): number {
   if (!(minMs > 0) || view.anchorAt === undefined) return 0;
-  if (view.hisAt !== undefined && now - view.hisAt > activeMs) return 0;
   const age = Math.max(0, now - view.anchorAt);
   return age >= minMs ? 0 : minMs - age;
 }

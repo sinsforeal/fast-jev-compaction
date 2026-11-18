@@ -34,6 +34,9 @@ Run once (vitest run tests/reply-gate.test.ts tests/standing.test.ts): 58 passed
 - Result: 12 files / 273 tests pass, typecheck exit 0. CHANGELOG, README step 6, hooks/README written.
 - Not verified: `$.fs.read` of the transcript path inside the real plugin host (outside the tree). Seen in the wider onWindows defect: nothing new.
 
+## 2026-11-18 17:3x review (meta orchestrator)
+- Removed the 30 min "active" window (HIS_ACTIVE_MS, TailView.hisAt, gateWait's activeMs): it switched the hold off for a reply that ends a turn of his longer than 30 min, the same early clear this fix is for. The anchor (newest turn his own message started) is the "active there" test, as in 0.5.25. Its test now asserts the long turn is held.
+
 ## Stage / left to do (older, from the capped agent; items 1-3 now done)
 1. tests/standing.test.ts line ~423: change the toContain to 'reply gate could not read the transcript'.
 2. Run: npx vitest run tests/reply-gate.test.ts tests/standing.test.ts tests/forced-handoff.test.ts tests/hook.test.ts; npm run typecheck.

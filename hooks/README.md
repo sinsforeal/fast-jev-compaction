@@ -137,8 +137,7 @@ can exist after these final checks reject clear; it is not proof of a clear.
 reply to the User is `replyVisibleMinMs` old (default 600000, 0 = off); the rules
 and the transcript record kinds are in `reply-gate.ts`. Only a turn that started
 with his own message counts; the sleeps are the host's `clock.sleep`, so the
-session stays free. 0.5.26: the hold applies only while his own last message is
-under 30 min old, and every plugin clear runs it (the standing clear too). An
+session stays free. 0.5.26: every plugin clear runs it (the standing clear too). An
 unreadable transcript fails closed: the clear waits the full `replyVisibleMinMs`
 from the time it was asked (WARNING line once per session), re-reads once, then
 goes.
