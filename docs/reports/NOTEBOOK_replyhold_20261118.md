@@ -25,7 +25,16 @@ Run once (vitest run tests/reply-gate.test.ts tests/standing.test.ts): 58 passed
 - standing "0.5.26 the standing clear waits": failed on `toContain('WARNING handoff: reply gate could not read the transcript')`: the once-per-module WARNING was already spent by an earlier test, the log had the plain line and the hold from 11:05 to 11:15 (10 min), which is the behavior wanted. The assertion fix (drop "WARNING handoff: ") was denied by the call cap, so this test still FAILS in this commit.
 - Not run at all: forced-handoff, hook, console-clear, idle-warm tests; `npm run typecheck` (tsc, incl. hooks config; buildReplyGate typing unchecked).
 
-## Stage / left to do
+## 2026-11-18 17:2x finish agent (Sonnet 5.5)
+- Finding: the 11 failures were the fakes, not a product bug. In tests/forced-handoff.test.ts the fake host (harness, line 47-88) has no file at the transcript path (`fs.read` throws 'missing', `process.run` exits 1), so readTail returns ok:false. 0.5.25 holdForReply returned `go` at once on that (old handoff.ts line ~311); 0.5.26 holds the full replyVisibleMinMs (hooks/handoff.ts holdForReply, blind wait through sleepSliced). The fake `clock.sleep` waits for `flush()` per 30 s slice, so 20 slices never finish and `$.command.run` is never called: "spy called 0 times". hook.test.ts and the stopped-session 0.5.17 case fail the same way.
+- Fix: harness defaults `replyVisibleMinMs: 0` with a comment; the product gate is unchanged and fail-closed. After it 272 of 273 passed, the one failure was my new test (turn left open without turn_duration -> clear deferred, correct product behaviour; added a turn_duration record) and a 1 ms clock tick in the sleep total (range assertion).
+- New test: '0.5.26 the registered clear waits until the reply to the User is 10 min old (readable tail, fake clock)': reply 3 min old, readable tail through the fake $.fs, clear fires 420 s later, not before.
+- standing.test.ts assertion fix was already in the tree.
+- Live probe (read-only): reply-gate readTail on the newest real transcript of the meta project, node:fs route and host-$.fs route (node:fs skipped, process.run throws if used): both 74 records, same anchorAt 2026-11-18T19:49:16Z.
+- Result: 12 files / 273 tests pass, typecheck exit 0. CHANGELOG, README step 6, hooks/README written.
+- Not verified: `$.fs.read` of the transcript path inside the real plugin host (outside the tree). Seen in the wider onWindows defect: nothing new.
+
+## Stage / left to do (older, from the capped agent; items 1-3 now done)
 1. tests/standing.test.ts line ~423: change the toContain to 'reply gate could not read the transcript'.
 2. Run: npx vitest run tests/reply-gate.test.ts tests/standing.test.ts tests/forced-handoff.test.ts tests/hook.test.ts; npm run typecheck.
 3. CHANGELOG.md 0.5.26 entry, README step 6 and hooks/README line (fail closed, host fs read, 30 min active, standing gate). Not written.
