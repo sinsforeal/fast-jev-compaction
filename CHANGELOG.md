@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.27 - 2026-11-18
+
+- Fix: 0.5.26 did not load. `buildReplyGate` (fast-jev.ts) held the host object in a second name (`const h = $ as ...`), and the Claude Code hooks loader refuses that: `compiled line 561 `const h = $;`: $ itself is bound to a name`. A refused module is no plugin at all. Three sessions restarted onto 0.5.26 at 17:20 (advisor, 8liq, analyst) ran without it until this version. `$` is now cast at each use.
+- `tests/host-loader-contract.test.ts`: new case `never binds $ itself to a name` (a variable initializer or an assignment whose value is `$`, casts unwrapped) over every file in hooks/. The 0.5.26 build was merged with this file not in the run; the whole suite is the gate before an install.
+- The reply hold of 0.5.26 is otherwise unchanged.
+
 ## 0.5.26 - 2026-11-18
 
 - Fix: the 10 minute reply hold was off in every session since 0.5.25 was installed. 11-18 17:03 Pick's reply was cleared 70 s after it was sent (the User, 11-18 17:04). Log `~/.claude/fast-jev-compaction.log`, session 198c03d3, 22:03:21Z: `WARNING handoff: reply gate could not read the transcript ($.process.run(sh) failed to start: ENOENT: Command 'sh' not found ...); the 10 min reply hold is OFF while this fails`, then the clear. 8 sessions logged that line (a943fe12, eb17522a, 39a2fd83, 74e1c914, f406d7c6, 78d6304e, fe981b9d, 198c03d3). Cause: in the plugin host `onWindows()` is false (`globalThis.process` is not usable, and `process.getBuiltinModule` gives no node:fs), so `readTail` chose `sh` on a Windows drive-letter path; the read failed, and 0.5.25 let the clear go at once on a failed read.

@@ -60,7 +60,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.26/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.27/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -711,15 +711,17 @@ function buildReplyGate(
   $: unknown, configured: HookConfig, roots: HandoffRoots,
 ): { minMs: number; read: (sessionId: string) => Promise<TailRead> } | undefined {
   if (!(configured.replyVisibleMinMs > 0)) return undefined;
-  const h = $ as LogHost & CwdHost & { env: { get: (key: string) => Promise<string | undefined> } };
+  // The host refuses a module that binds `$` to another name (0.5.26 first build: `const h = $` failed to load
+  // in three restarted sessions, 2026-11-18 17:20); cast it at each use.
+  type GateHost = LogHost & CwdHost & { env: { get: (key: string) => Promise<string | undefined> } };
   return {
     minMs: configured.replyVisibleMinMs,
     read: async id => {
       try {
-        const home = (await h.env.get('USERPROFILE')) ?? (await h.env.get('HOME'));
-        const cwd = await resolvedCwd(h);
+        const home = (await ($ as GateHost).env.get('USERPROFILE')) ?? (await ($ as GateHost).env.get('HOME'));
+        const cwd = await resolvedCwd($ as GateHost);
         if (!home || !cwd) return { ok: false as const, error: 'no home or cwd for the transcript path' };
-        const dir = await roots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log(h, text));
+        const dir = await roots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log($ as GateHost, text));
         return await readTail($ as TailHost, { path: transcriptPath(home, cwd, id), dir });
       } catch { return { ok: false as const, error: 'transcript path could not be resolved' }; }
     },

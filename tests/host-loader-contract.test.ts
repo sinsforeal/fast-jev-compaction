@@ -94,6 +94,28 @@ describe('host loader contract', () => {
     }
   });
 
+  // 0.5.26 first build: `const h = $ as ...` inside a top-level helper of fast-jev.ts. The loader's message,
+  // verbatim: "compiled line 561 `const h = $;`: $ itself is bound to a name". Three restarted sessions ran
+  // with no plugin (2026-11-18 17:20). Cast `$` at each use, never give it a second name.
+  it('never binds $ itself to a name', () => {
+    for (const name of sources) {
+      const text = readFileSync(join(HOOKS_DIR, name), 'utf8');
+      const source = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true);
+      const found: string[] = [];
+      const visit = (node: ts.Node) => {
+        const value = (ts.isVariableDeclaration(node) && node.initializer) ? unwrap(node.initializer)
+          : (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) ? unwrap(node.right)
+          : undefined;
+        if (value && ts.isIdentifier(value) && value.text === '$') {
+          found.push(`${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}: ${node.getText(source).slice(0, 60)}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+      expect(found, name).toEqual([]);
+    }
+  });
+
   it('passes $ only to top-level functions, const functions or module imports in identifier calls', () => {
     for (const name of sources) {
       expect(hostHelperViolations(readFileSync(join(HOOKS_DIR, name), 'utf8')), name).toEqual([]);
