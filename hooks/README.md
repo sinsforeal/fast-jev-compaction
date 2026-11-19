@@ -121,8 +121,10 @@ The compaction callback requests NOW but cannot clear or repeat an outstanding
 order. Later non-aborted main-loop completions validate the file and continue
 the cycle, including outside the token-trigger opt-in. The first completion
 following an immediate force does not duplicate NOW. Later incomplete files
-allow at most 3 NOW repeats; then the machine logs "handoff not written" and
-retains context. Aborted completions neither repeat nor clear.
+allow at most 3 NOW repeats, each only after `orderRepeatGraceMs` (0.5.29,
+default 5 minutes) with no order and no write to the file, and the file is
+checked against the order that opened the cycle; then the machine logs
+"handoff not written" and retains context. Aborted completions neither repeat nor clear.
 
 Before clear, `latest.md` must be a regular file newer than the latest order.
 The first 10 lines must name the exact session id, not a prefix/suffix match;
@@ -186,7 +188,7 @@ The UI diagnostics themselves are not sent as model context. All receipts remain
 in `~/.claude/fast-jev-compaction.log`; log failures never alter the cut.
 
 The first registered callback per session writes a disk-only `module-loaded`
-receipt with `hook=fast-jev-compaction@0.5.28/forced-handoff-floor`, the full session
+receipt with `hook=fast-jev-compaction@0.5.29/forced-handoff-floor`, the full session
 id and `DISABLE_AUTO_COMPACT=1|unset|other|unreadable`. It never logs an arbitrary
 environment value or error. Registration alone writes nothing; callback reload
 may emit a new receipt for the same session. Require a fresh intended-session

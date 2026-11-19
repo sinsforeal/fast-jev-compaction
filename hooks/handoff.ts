@@ -44,8 +44,15 @@ export type HandoffHost = {
 export type HandoffState = {
   /** Visible size at the last HANDOFF SOON order. */
   lastSoonAt?: number;
-  /** Time (clock.now) of the latest order of either kind; the file must be newer. */
+  /** Time (clock.now) of the latest order of either kind, a repeat included. Since 0.5.29 only the repeat grace reads it. */
   orderAt?: number;
+  /**
+   * 0.5.29: time of the order that opened this cycle (the SOON, the first NOW, or a stale-file refresh). The file
+   * must be newer than THIS. A repeat never moves it: in 0.5.28 each repeat moved `orderAt`, so a file the session
+   * finished between two repeats read "older than the order" and after 4 orders the clear was given up
+   * (eve c68f35dd, 2026-11-19T00:42:03Z to 00:43:05Z). Absent in a record from an older version: `orderAt` is used.
+   */
+  firstOrderAt?: number;
   /** Forced (NOW) orders sent, the first included. */
   forcedOrders: number;
   /** "handoff not written" was logged; no more orders, pruning goes on. */
@@ -66,6 +73,17 @@ export type HandoffState = {
 
 export const SOON_STEP_TOKENS = 50_000;
 export const MAX_FORCED_REPEATS = 3;
+/**
+ * 0.5.29: a forced order is repeated only when this long has passed with no sign of work on it: counted from the
+ * latest order or the handoff file's last write, whichever is later. A turn end inside it repeats nothing. Turn
+ * ends come seconds apart while a session writes its handover (a Stop hook that blocks the stop ends a turn, so
+ * does a queued prompt), and 0.5.28 repeated on each: eve got the order 4 times in 56 s while it was writing.
+ */
+export const ORDER_REPEAT_GRACE_MS = 5 * 60_000;
+/** The time a handoff file must be newer than: the order that opened the cycle. */
+export function fileMustBeAfter(state: Pick<HandoffState, 'orderAt' | 'firstOrderAt'>): number | undefined {
+  return state.firstOrderAt ?? state.orderAt;
+}
 export const MAX_CLEAR_FAILURES = 3;
 /** 0.5.16: after a burst of failed clears, the next burst waits this long; retries never stop for good. */
 export const CLEAR_RETRY_COOLDOWN_MS = 10 * 60_000;
@@ -81,6 +99,8 @@ export const MAX_STALE_REFRESHES = 2;
 const pendingClears = new Set<string>();
 /** 0.5.25: sessions whose unreadable-transcript WARNING was logged. */
 const gateReadWarned = new Set<string>();
+/** 0.5.29: one "no repeat yet" log line per session and order count. */
+const graceLogged = new Set<string>();
 /**
  * 0.5.14: the text of the SOON/NOW order that is out for a session and whose file is not complete yet.
  * `$.prompt.submit` can end without the order ever reaching the model (21687c6d, 2026-10-20: four orders,
@@ -210,7 +230,8 @@ export function resumeOrder(latest: string, config: HandoffConfig): string {
   return `HANDOFF RESUME: read ${latest} and follow ${config.handoffSkillPath ?? 'the handoff skill'} section Resume; verify every SHA and queue row against git before acting.`;
 }
 
-export type FileCheck = { ok: true; mtimeMs: number; size: number } | { ok: false; reason: string };
+/** A failing check carries the file's mtime when the file could be stat'ed: it shows the session is still writing it. */
+export type FileCheck = { ok: true; mtimeMs: number; size: number } | { ok: false; reason: string; mtimeMs?: number };
 
 /**
  * A handoff file counts only when it exists, was written after the order, its
@@ -226,15 +247,15 @@ export async function checkLatest(
     if (!(await host.fs.exists(path))) return { ok: false, reason: 'missing' };
     const stat = await host.fs.stat(path);
     if (stat.kind !== 'file') return { ok: false, reason: 'not a file' };
-    if (!(stat.mtimeMs > orderAt)) return { ok: false, reason: 'older than the order' };
+    if (!(stat.mtimeMs > orderAt)) return { ok: false, reason: 'older than the order', mtimeMs: stat.mtimeMs };
     const lines = (await host.fs.read(path)).split(/\r?\n/);
     const after = await host.fs.stat(path);
-    if (after.kind !== 'file' || after.mtimeMs !== stat.mtimeMs || after.size !== stat.size) return { ok: false, reason: 'changed while reading' };
+    if (after.kind !== 'file' || after.mtimeMs !== stat.mtimeMs || after.size !== stat.size) return { ok: false, reason: 'changed while reading', mtimeMs: after.mtimeMs };
     const escapedId = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const sessionName = new RegExp(`(^|[^A-Za-z0-9_-])${escapedId}($|[^A-Za-z0-9_-])`);
     if (!lines.slice(0, 10).some(line => sessionName.test(line))) return { ok: false, reason: 'header does not name this session' };
     const last = [...lines].reverse().find(line => line.trim().length > 0);
-    if (last?.trim() !== 'COMPLETE') return { ok: false, reason: 'last line is not COMPLETE' };
+    if (last?.trim() !== 'COMPLETE') return { ok: false, reason: 'last line is not COMPLETE', mtimeMs: stat.mtimeMs };
     return { ok: true, mtimeMs: stat.mtimeMs, size: stat.size };
   } catch {
     return { ok: false, reason: 'unreadable' };
@@ -254,6 +275,8 @@ export type StepContext = {
   thresholdsEnabled?: boolean;
   /** Do not repeat NOW at the end of the turn that first requested it. File validation still runs. */
   repeatForced?: boolean;
+  /** 0.5.29: see ORDER_REPEAT_GRACE_MS (the default when absent); 0 = repeat at the next turn end, as before. */
+  repeatGraceMs?: number;
   config: HandoffConfig;
   log: (text: string) => Promise<void>;
   /** Runs work after the hook has returned; errors are the work's own to log. */
@@ -522,7 +545,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   }
   // 1. An order is out: is the file complete and newer than it?
   if (!ctx.requestOnly && state.orderAt !== undefined && !state.clearBlocked && state.clearFailures < MAX_CLEAR_FAILURES) {
-    const check = await checkAny(state.orderAt);
+    const check = await checkAny(fileMustBeAfter(state)!);
     if (check.ok) {
       const canClear = await clearAvailable(host);
       // Another completion can schedule a clear while capability lookup is awaiting.
@@ -548,7 +571,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           }
           // The file may have changed since the hook queued this work. Revalidate
           // after the detached delay; a stale/incomplete/missing file never clears.
-          const fresh = await checkAny(state.orderAt!);
+          const fresh = await checkAny(fileMustBeAfter(state)!);
           if (!fresh.ok) {
             await log(`handoff changed before clear (${fresh.reason}); context retained`);
             return;
@@ -561,6 +584,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
               again.refreshes = (again.refreshes ?? 0) + 1;
               again.forcedOrders = Math.max(again.forcedOrders, 1);
               again.orderAt = await host.clock.now();
+              again.firstOrderAt = again.orderAt; // a fresh file is wanted: this order opens a new cycle
               await save(host, sessionId, again);
               await log(`handoff: ${latest} is older than a prompt that came during the reply wait (file ${clockText(fresh.mtimeMs)}, prompt ${clockText(gate.lastPromptAt)}); ordering a fresh handoff (${again.refreshes} of ${MAX_STALE_REFRESHES})`);
               await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: again.forcedOrders, reason: again.forceReason, window: windowNote(config) });
@@ -578,7 +602,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
           if (await host.session.id() !== sessionId) return;
           // Marker writes and logs await host calls too. Nothing may clear a file
           // replaced during those awaits, or resume from a marker for another version.
-          const final = await checkAny(state.orderAt!);
+          const final = await checkAny(fileMustBeAfter(state)!);
           if (!final.ok || final.mtimeMs !== fresh.mtimeMs || final.size !== fresh.size) {
             await log(`handoff changed immediately before clear (${final.ok ? 'file replaced' : final.reason}); context retained`);
             return;
@@ -643,9 +667,21 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
     // 2. Outstanding forced order, file not complete: repeat once per turn, capped.
     if (state.forcedOrders > 0 && !state.gaveUp) {
       if (ctx.repeatForced === false) return;
+      // 0.5.29: no repeat while the order is young or the file is still being written (ORDER_REPEAT_GRACE_MS).
+      const grace = ctx.repeatGraceMs ?? ORDER_REPEAT_GRACE_MS;
+      const at = await host.clock.now();
+      const lastSign = Math.max(state.orderAt ?? 0, check.ok ? 0 : (check.mtimeMs ?? 0));
+      if (grace > 0 && at - lastSign < grace) {
+        const key = `${sessionId}:${state.forcedOrders}`;
+        if (!graceLogged.has(key)) {
+          graceLogged.add(key);
+          await log(`handoff order outstanding (${check.reason}); no repeat before ${Math.round(grace / 60_000 * 10) / 10} min pass with no order and no write to the file`);
+        }
+        return;
+      }
       if (state.forcedOrders - 1 < MAX_FORCED_REPEATS) {
         state.forcedOrders += 1;
-        state.orderAt = await host.clock.now();
+        state.orderAt = at; // firstOrderAt stays: a file written since the first order still counts
         await save(host, sessionId, state);
         await log(`handoff order repeated (${state.forcedOrders - 1} of ${MAX_FORCED_REPEATS}); file not complete: ${check.reason}`);
         const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason, window: windowNote(config) });
@@ -669,6 +705,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
     if (state.forcedOrders === 0) {
       state.forcedOrders = 1;
       state.orderAt = await host.clock.now();
+      state.firstOrderAt = state.orderAt;
       await save(host, sessionId, state);
       const marker = await writeOrderMarker(host, dir, sessionId, { order: 'now', tokens: visible, limit: config.handoffForceAt, attempt: state.forcedOrders, reason: state.forceReason, window: windowNote(config) });
       const cause = state.forceReason ? `forced by ${state.forceReason}; actual context tokens ${visible ?? 'unavailable'}` : `at ~${visible} tokens (limit ${config.handoffForceAt})`;
@@ -681,6 +718,7 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
       (state.lastSoonAt === undefined || visible >= state.lastSoonAt + SOON_STEP_TOKENS)) {
     state.lastSoonAt = visible;
     state.orderAt = await host.clock.now();
+    state.firstOrderAt = state.orderAt;
     state.soonOrders = (state.soonOrders ?? 0) + 1;
     await save(host, sessionId, state);
     const marker = await writeOrderMarker(host, dir, sessionId, { order: 'soon', tokens: visible, limit: config.handoffAt, attempt: state.soonOrders, window: windowNote(config) });

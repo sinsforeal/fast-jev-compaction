@@ -54,13 +54,14 @@ const HOOK_DEFAULTS = {
   idleWarmMinutes: 0,
   idleWarmMax: 6,
   replyVisibleMinMs: 600_000,
+  orderRepeatGraceMs: 300_000,
 };
 
 /** After a prune or a skip, the next trigger needs this much growth past the post-cut (or skipped) size. */
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.28/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.29/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -109,6 +110,8 @@ export type HookConfig = CompactOptions & {
   idleWarmMax: number;
   /** 0.5.25: a reply to the User stays visible this long (ms) before the handoff clear; 0 = off. */
   replyVisibleMinMs: number;
+  /** 0.5.29: a forced handoff order is repeated only after this long (ms) with no order and no write to the file; 0 = at the next turn end. */
+  orderRepeatGraceMs: number;
 };
 
 class JevRequestError extends Error {}
@@ -161,6 +164,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     idleWarmMinutes: Math.max(0, optionNumber(options, 'idleWarmMinutes', HOOK_DEFAULTS.idleWarmMinutes)),
     idleWarmMax: positive(optionNumber(options, 'idleWarmMax', HOOK_DEFAULTS.idleWarmMax), HOOK_DEFAULTS.idleWarmMax),
     replyVisibleMinMs: Math.max(0, Math.floor(optionNumber(options, 'replyVisibleMinMs', HOOK_DEFAULTS.replyVisibleMinMs))),
+    orderRepeatGraceMs: Math.max(0, Math.floor(optionNumber(options, 'orderRepeatGraceMs', HOOK_DEFAULTS.orderRepeatGraceMs))),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -1139,6 +1143,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         const win = await windowFor($ as unknown as WindowHost, configured, handoffRoots, sid, cwdNow, windows);
         await handoffStep($ as unknown as HandoffHost, {
           sessionId: sid, visible, thresholdsEnabled: hybrid, repeatForced: !justForced,
+          repeatGraceMs: configured.orderRepeatGraceMs,
           config: { ...win,
             handoffDir: await handoffRoots.resolve(cwdNow, sid, configured.handoffDir, text => log($, text)),
             handoffSkillPath: await handoffRoots.resolve(cwdNow, sid, configured.handoffSkillPath, text => log($, text)) },

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.29 - 2026-11-18
+
+- Fix: a session got the HANDOFF NOW order up to 4 times within a minute while it was writing the file, and the clear was then given up (the User, 11-18 19:44: "Why does the handoff command ... cause eve to do the message 3 times"; 19:46: "Fix it"). Log, session c68f35dd: order 00:42:03Z, `handoff order repeated` at 00:42:49, 00:42:54 and 00:42:58, `handoff not written ... after 4 forced orders; pruning goes on, no clear` at 00:43:05; the file was finished minutes later. 19 repeats and 3 give-ups since 11-12.
+- Cause 1: step 2 of `handoffStep` repeated the order at every turn end with an incomplete file. Turn ends come seconds apart while a handover is written (a Stop hook that blocks the stop ends a turn, so does a queued prompt). Now a repeat needs `orderRepeatGraceMs` (new option, default 300000) with no order and no write to the handoff file (`ORDER_REPEAT_GRACE_MS`, the failing `FileCheck` carries the file's mtime). One log line per order says the repeat is waiting.
+- Cause 2: every repeat moved `orderAt`, and the file had to be newer than `orderAt`, so a file finished between two repeats read `older than the order` for good. New `HandoffState.firstOrderAt` is the time of the order that opened the cycle (SOON, first NOW, or a stale-file refresh); the file is checked against it (`fileMustBeAfter`) and a repeat never moves it. A record from an older version has none and falls back to `orderAt`.
+- A give-up no longer strands the session: a file completed after it is newer than `firstOrderAt`, so the next turn end clears from it.
+- Tests: `tests/forced-handoff.test.ts`, three cases with the grace on: the c68f35dd turn-end spacing replayed (one order, the finished file clears), a write restarts the wait and five quiet minutes repeat once, a file dated before a repeat still clears. The harness default is `orderRepeatGraceMs: 0`, so the older repeat tests run as before.
+
 ## 0.5.28 - 2026-11-18
 
 - Fix: 0.5.27 did not load either. `readTail` and `readTailHostFs` (reply-gate.ts) receive `$` as `host` and tested `host.fs.read` and `host.fs.stat` for existence before calling them; the loader follows `$` into the function and refuses the read: `compiled line 225 `if (host.fs.read) {`: $.fs.read is used as a value`. Both are now called with no existence test; a host without them throws inside the route's own try and the next route runs.
