@@ -1,7 +1,9 @@
 /**
  * 0.5.25: a reply to the User stays visible at least `replyVisibleMinMs` (default 10 min) before the
- * handoff clear. Only a reply to the User's own message counts. Replies to peer messages, task
- * notifications, plugin prompts (HANDOFF NOW / RESUME) and hook feedback do not.
+ * handoff clear. Only a reply to the User's own message counts. Replies to peer messages, plugin prompts
+ * (HANDOFF NOW / RESUME) and hook feedback do not. 0.5.30: a reply in a turn a task notification started
+ * counts too, when his own last message is at most NOTIFICATION_WINDOW_MS (60 min) before the notification:
+ * the report of the result of his own order, made when the agent he caused finished, answers him.
  *
  * The session transcript is the evidence (the plugin cannot see every delivery): this module reads the
  * tail of `<home>/.claude/projects/<slug>/<sid>.jsonl`, keeps only the user records that start or
@@ -109,14 +111,26 @@ const FEED_WRAP = /^\s*<channel\s+source="(?:feed|pick-assist)"/i;
 const RESTART_PROMPT = /^\s*Window restarted by Ryan v2\b/;
 const COMPANION_HEAD = /^\s*(?:<local-command|<command-name|<system-reminder|<task-notification|Stop hook feedback|\[Image)/;
 
-export type UserKind = 'his' | 'other' | 'companion' | 'interrupt';
+export type UserKind = 'his' | 'notification' | 'other' | 'companion' | 'interrupt';
+
+/**
+ * 0.5.30: a turn that a task notification starts counts as a turn of his when his own last message is at most
+ * this long before the notification. Case: meta session ac9a295b, 2026-11-19. His order at 09:27:54Z, the
+ * build agent for it finished at 09:39:28Z (a task-notification record starts a turn), the landing report was
+ * the reply at 09:41:41Z, and the clear went at 09:43:02Z with no hold because the gate anchored on the 09:31:00Z
+ * reply to the order itself. The report of an agent he caused answers him.
+ */
+export const NOTIFICATION_WINDOW_MS = 60 * 60_000;
 
 /**
  * His own message: origin human (typed or queued), or a channel message from feed / pick-assist (his phone
- * or headset); composer and bridge too, the kinds standing.ts counts. A peer channel message, task
- * notification, plugin prompt or any other origin is `other`. Stop-hook feedback, a system-reminder
- * companion, an image note and the /clear command records are `companion`: they continue the turn they
- * sit in and never start one. `[Request interrupted` ends the turn.
+ * or headset); composer and bridge too, the kinds standing.ts counts. A task notification (origin kind
+ * `task-notification`, a record that has an origin key in Claude Code 2.1.327) is `notification`: it starts a
+ * turn that analyzeTail counts as his only when his own last message is within NOTIFICATION_WINDOW_MS. A peer
+ * channel message, plugin prompt, the restart prompt or any other origin is `other` and never counts.
+ * Stop-hook feedback, a system-reminder companion, an image note, the /clear command records and a record with
+ * no origin key whose text starts `<task-notification` (older transcripts; not the 11-19 case) are
+ * `companion`: they continue the turn they sit in and never start one. `[Request interrupted` ends the turn.
  */
 export function classifyUser(rec: Slim): UserKind {
   const head = rec.head ?? '';
@@ -124,6 +138,7 @@ export function classifyUser(rec: Slim): UserKind {
   if (RESTART_PROMPT.test(head)) return 'other';
   const kind = rec.origin?.kind;
   if (kind === 'human' || kind === 'composer' || kind === 'bridge') return 'his';
+  if (kind === 'task-notification') return 'notification';
   if (kind === 'channel') return /^(feed|pick-assist)$/i.test(String(rec.origin?.server ?? '')) || FEED_WRAP.test(head) ? 'his' : 'other';
   if (kind === 'unclassified') return FEED_WRAP.test(head) ? 'his' : 'other';
   if (kind !== undefined) return 'other';
@@ -134,9 +149,15 @@ export function classifyUser(rec: Slim): UserKind {
 }
 
 export type TailView = {
-  /** Time of the last assistant text in the newest turn that his message started. */
+  /**
+   * Time of the last assistant text in a turn that counts as his: the newest turn his message started, or a
+   * later task-notification turn within NOTIFICATION_WINDOW_MS of that message (0.5.30).
+   */
   replyAt?: number;
-  /** replyAt, or the time of his message when that turn has no reply yet. Undefined = no turn of his in the window. */
+  /**
+   * replyAt, or the time of his message when no counting turn has a reply yet. A notification turn with no
+   * assistant text moves nothing. Undefined = no turn of his in the window.
+   */
   anchorAt?: number;
   /** A turn is open: its user record has no turn end after it. */
   busy: boolean;
@@ -146,20 +167,37 @@ export type TailView = {
   count: number;
 };
 
+/**
+ * Walks the kept records and finds the reply the gate anchors on. A turn opens at each prompt record that is
+ * not a companion. An assistant text moves the anchor only when its turn counts:
+ *   - a turn his own message started (origin human, feed, pick-assist, composer, bridge): always;
+ *   - 0.5.30: a turn a task notification started, when his own last message (the start of the newest turn of
+ *     his) is at most NOTIFICATION_WINDOW_MS before the notification. Its text is stored on his turn, so
+ *     replyAt and anchorAt move as for a reply in his own turn. A notification turn with no assistant text
+ *     moves nothing: the anchor does not go to the notification's start time;
+ *   - a turn started by a peer channel message, plugin prompt, restart prompt or any other origin: never,
+ *     whatever its age.
+ * `busy` and `lastPromptAt` follow every non-companion prompt of any origin.
+ */
 export function analyzeTail(records: readonly Slim[]): TailView {
-  let cur: { his: boolean; startedAt: number; replyAt?: number } | undefined;
-  let lastHis: typeof cur;
+  type Turn = { startedAt: number; replyAt?: number };
+  let cur: { counts: Turn | undefined } | undefined;
+  let lastHis: Turn | undefined;
   let busy = false;
   let lastPromptAt: number | undefined;
   for (const rec of records) {
     if (rec.side) continue;
     if (rec.r === 'e') { busy = false; continue; }
-    if (rec.r === 'a') { if (cur?.his) cur.replyAt = rec.t; continue; }
+    if (rec.r === 'a') { if (cur?.counts) cur.counts.replyAt = rec.t; continue; }
     const kind = classifyUser(rec);
     if (kind === 'companion') continue;
     if (kind === 'interrupt') { busy = false; continue; }
-    cur = { his: kind === 'his', startedAt: rec.t };
-    if (cur.his) lastHis = cur;
+    if (kind === 'his') {
+      lastHis = { startedAt: rec.t };
+      cur = { counts: lastHis };
+    } else if (kind === 'notification' && lastHis && rec.t >= lastHis.startedAt && rec.t - lastHis.startedAt <= NOTIFICATION_WINDOW_MS) {
+      cur = { counts: lastHis };
+    } else cur = { counts: undefined };
     busy = true;
     lastPromptAt = rec.t;
   }

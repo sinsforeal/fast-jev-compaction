@@ -121,7 +121,7 @@ describe('slimLine and classifyUser on real-shaped lines', () => {
     expect(kind(channel(T0, 'peer'))).toBe('other');
     expect(kind(channel(T0, 'feed'))).toBe('his');
     expect(kind(channel(T0, 'pick-assist'))).toBe('his');
-    expect(kind(taskNote(T0))).toBe('other');
+    expect(kind(taskNote(T0))).toBe('notification');
     expect(kind(pluginPrompt(T0))).toBe('other');
     expect(kind(companion(T0))).toBe('companion');
     expect(kind(interrupt(T0))).toBe('interrupt');
@@ -138,20 +138,77 @@ describe('slimLine and classifyUser on real-shaped lines', () => {
     expect(slimLine('not json at all')).toBeUndefined();
   });
 
-  it('analyzeTail takes the last reply to him and ignores peer, task and plugin turns', () => {
+  it('analyzeTail takes the last reply to him and ignores peer, a late task notification and plugin turns', () => {
     const recs = parseTail([
       his(T0), reply(T0 + 10_000), end(T0 + 10_500),
       channel(T0 + 20_000, 'peer'), reply(T0 + 25_000), end(T0 + 25_500),
-      taskNote(T0 + 30_000), reply(T0 + 31_000), end(T0 + 31_500),
-      pluginPrompt(T0 + 40_000), reply(T0 + 41_000), end(T0 + 41_500),
+      taskNote(T0 + 61 * MIN), reply(T0 + 61 * MIN + 1000), end(T0 + 61 * MIN + 1500),
+      pluginPrompt(T0 + 62 * MIN), reply(T0 + 62 * MIN + 1000), end(T0 + 62 * MIN + 1500),
     ].join('\n'));
     const view = analyzeTail(recs);
     expect(view.replyAt).toBe(T0 + 10_000);
-    expect(view.lastPromptAt).toBe(T0 + 40_000);
+    expect(view.lastPromptAt).toBe(T0 + 62 * MIN);
     expect(view.busy).toBe(false);
     expect(gateWait(view, T0 + 10_000 + 4 * MIN, 10 * MIN)).toBe(6 * MIN);
     expect(gateWait(view, T0 + 10_000 + 10 * MIN, 10 * MIN)).toBe(0);
     expect(gateWait(view, T0, 0)).toBe(0);
+  });
+
+  describe('0.5.30 task notification turns', () => {
+    const base = [his(T0), reply(T0 + 10_000), end(T0 + 10_500)];
+    const anchor = (lines: string[]) => analyzeTail(parseTail([...base, ...lines].join('\n')));
+
+    it('(a) a notification turn 8 min after his message with a reply moves the anchor to that reply', () => {
+      const view = anchor([taskNote(T0 + 8 * MIN), reply(T0 + 10 * MIN, 'landing report'), end(T0 + 10 * MIN + 500)]);
+      expect(view.replyAt).toBe(T0 + 10 * MIN);
+      expect(view.anchorAt).toBe(T0 + 10 * MIN);
+    });
+
+    it('a notification turn exactly 60 min after his message still counts', () => {
+      expect(anchor([taskNote(T0 + 60 * MIN), reply(T0 + 61 * MIN), end(T0 + 61 * MIN + 500)]).anchorAt).toBe(T0 + 61 * MIN);
+    });
+
+    it('(b) a notification turn 61 min after his message leaves the anchor where it was', () => {
+      const view = anchor([taskNote(T0 + 61 * MIN), reply(T0 + 62 * MIN), end(T0 + 62 * MIN + 500)]);
+      expect(view.anchorAt).toBe(T0 + 10_000);
+      expect(view.replyAt).toBe(T0 + 10_000);
+    });
+
+    it('(c) a notification turn with no assistant text moves nothing, not even to its start', () => {
+      const view = anchor([taskNote(T0 + 8 * MIN), end(T0 + 8 * MIN + 500)]);
+      expect(view.anchorAt).toBe(T0 + 10_000);
+      expect(view.lastPromptAt).toBe(T0 + 8 * MIN);
+      const noReply = analyzeTail(parseTail([his(T0), taskNote(T0 + 8 * MIN), end(T0 + 8 * MIN + 500)].join('\n')));
+      expect(noReply.anchorAt).toBe(T0);
+      expect(noReply.replyAt).toBeUndefined();
+    });
+
+    it('(d) a peer channel turn with a reply 2 min after his message leaves the anchor where it was', () => {
+      const view = anchor([channel(T0 + 2 * MIN, 'peer'), reply(T0 + 2 * MIN + 5000, 'sent'), end(T0 + 2 * MIN + 5500)]);
+      expect(view.anchorAt).toBe(T0 + 10_000);
+    });
+
+    it('a restart prompt or plugin prompt turn within the window leaves the anchor where it was', () => {
+      const restart = userLine(T0 + 2 * MIN, { kind: 'plugin', name: 'x' }, 'Window restarted by Ryan v2: read the handoff');
+      const view = anchor([restart, reply(T0 + 2 * MIN + 1000), end(T0 + 2 * MIN + 1500), pluginPrompt(T0 + 3 * MIN), reply(T0 + 3 * MIN + 1000)]);
+      expect(view.anchorAt).toBe(T0 + 10_000);
+    });
+
+    it('a notification with no turn of his in the tail moves nothing', () => {
+      const view = analyzeTail(parseTail([taskNote(T0), reply(T0 + 1000), end(T0 + 1500)].join('\n')));
+      expect(view.anchorAt).toBeUndefined();
+    });
+
+    it('the 11-19 ac9a295b shape: reply to his order at 09:31:00, notification at 09:39:28, report at 09:41:41', () => {
+      const z = (s: string): number => Date.parse(`2026-11-19T${s}Z`);
+      const view = analyzeTail(parseTail([
+        his(z('09:27:54.000')), reply(z('09:31:00.882')), end(z('09:31:01.000')),
+        taskNote(z('09:39:28.869')), reply(z('09:41:41.000')), end(z('09:41:42.000')),
+      ].join('\n')));
+      expect(view.anchorAt).toBe(z('09:41:41.000'));
+      expect(gateWait(view, z('09:43:02.953'), 10 * MIN)).toBeGreaterThan(518_000);
+      expect(gateWait(view, z('09:43:02.953'), 10 * MIN)).toBeLessThan(520_000);
+    });
   });
 
   it('busy is true while a turn has no end, false after an interrupt', () => {
@@ -218,6 +275,19 @@ describe('0.5.25 the clear waits for a visible reply to him', () => {
     expect(r.logs.some(l => l.includes('clear held'))).toBe(false);
   });
 
+  it('0.5.30 (e) a clear with no hold logs why: the age of the last reply, or no reply in the tail', async () => {
+    const replyAt = T0 - 11 * MIN;
+    const old = rig(hisTurn(replyAt - 5000, replyAt));
+    await old.order(); await old.step();
+    expect(old.logs.filter(l => l.startsWith('handoff: clear goes with no hold'))).toEqual([
+      expect.stringMatching(/^handoff: clear goes with no hold: last reply to the user at \d\d:\d\d:\d\d is 660 s old$/),
+    ]);
+    const none = rig([channel(T0 - 10_000, 'peer'), reply(T0 - 5000, 'sent'), end(T0 - 4500)]);
+    await none.order(); await none.step();
+    expect(none.clearCalls()).toBe(1);
+    expect(none.logs).toContain('handoff: clear goes with no hold: no reply to the user in the tail');
+  });
+
   it('a last turn from a peer channel message clears at once, even seconds old', async () => {
     const r = rig([...hisTurn(T0 - 30 * MIN, T0 - 29 * MIN), channel(T0 - 10_000, 'peer'), reply(T0 - 5000, 'sent'), end(T0 - 4500)]);
     await r.order(); await r.step();
@@ -225,11 +295,20 @@ describe('0.5.25 the clear waits for a visible reply to him', () => {
     expect(r.state.clearedAt! - T0).toBeLessThan(1000);
   });
 
-  it('task notification and plugin prompt turns do not count either', async () => {
-    const r = rig([...hisTurn(T0 - 30 * MIN, T0 - 29 * MIN), taskNote(T0 - 20_000), reply(T0 - 15_000), end(T0 - 14_500),
+  it('a task notification turn more than 60 min after his message and a plugin prompt turn do not count', async () => {
+    const r = rig([...hisTurn(T0 - 90 * MIN, T0 - 89 * MIN), taskNote(T0 - 20_000), reply(T0 - 15_000), end(T0 - 14_500),
       pluginPrompt(T0 - 10_000), reply(T0 - 5000), end(T0 - 4500)]);
     await r.order(); await r.step();
     expect(r.state.clearedAt! - T0).toBeLessThan(1000);
+  });
+
+  it('0.5.30 a reply in a task notification turn 8 min after his message holds the clear 10 min from that reply', async () => {
+    const r = rig([...hisTurn(T0 - 20 * MIN, T0 - 19 * MIN), taskNote(T0 - 12 * MIN), reply(T0 - 2 * MIN, 'landing report'), end(T0 - 2 * MIN + 500)]);
+    await r.order(); await r.step();
+    expect(r.clearCalls()).toBe(1);
+    expect(r.state.clearedAt!).toBeGreaterThanOrEqual(T0 - 2 * MIN + 10 * MIN);
+    expect(r.state.clearedAt!).toBeLessThan(T0 - 2 * MIN + 10 * MIN + 31_000);
+    expect(r.logs.some(l => /clear held \d+ s: last reply to the user at/.test(l))).toBe(true);
   });
 
   it.each(['feed', 'pick-assist'] as const)('a %s channel message counts as his', async server => {

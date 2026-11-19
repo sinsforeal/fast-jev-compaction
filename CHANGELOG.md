@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.30 - 2026-11-19
+
+- Fix: the reply gate did not hold the clear for the report of the result of his own order (the User 11-16 16:23: a reply to him stays visible 10 minutes before a clear). Meta session ac9a295b, times Z: his order 09:27:54, my reply to it 09:31:00 (the anchor the gate used), a `<task-notification>` record at 09:39:28 started a turn (the build agent for his order finished), the landing report was the reply at 09:41:41, and the clear went at 09:43:02 with no hold and no log line. The report was on screen 81 s.
+- Cause: the real record carries `origin {"kind":"task-notification","producer":"session-task",...}`, so `classifyUser` returned `other` (the `COMPANION_HEAD` path for records with no origin key is not reached) and `analyzeTail` never let a reply in such a turn move the anchor.
+- `classifyUser` returns the new kind `notification` for it. `analyzeTail` counts a notification turn as his when his own last message is at most `NOTIFICATION_WINDOW_MS` (60 min, new exported constant in reply-gate.ts) before the notification: its assistant text moves `replyAt` and `anchorAt`. A notification turn with no assistant text moves nothing. A peer channel, plugin, restart-prompt or other-origin turn never moves the anchor, whatever its age.
+- `holdForReply` logs one line when a clear goes with no hold: `handoff: clear goes with no hold: last reply to the user at HH:MM:SS is N s old`, or `... no reply to the user in the tail`. The path was silent.
+- Tests: `tests/reply-gate.test.ts`, new cases for a notification turn at 8 min, at exactly 60 min, at 61 min, with no text, a peer turn, a restart and plugin turn, no turn of his, the 11-19 shape replayed, and both no-hold log lines. Two older cases that counted a notification 20 s or 30 s after his message as not his now use a notification more than 60 min old.
+
 ## 0.5.29 - 2026-11-18
 
 - Fix: a session got the HANDOFF NOW order up to 4 times within a minute while it was writing the file, and the clear was then given up (the User, 11-18 19:44: "Why does the handoff command ... cause eve to do the message 3 times"; 19:46: "Fix it"). Log, session c68f35dd: order 00:42:03Z, `handoff order repeated` at 00:42:49, 00:42:54 and 00:42:58, `handoff not written ... after 4 forced orders; pruning goes on, no clear` at 00:43:05; the file was finished minutes later. 19 repeats and 3 give-ups since 11-12.

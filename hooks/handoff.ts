@@ -316,8 +316,10 @@ async function sleepSliced(host: HandoffHost, sessionId: string, ms: number): Pr
 /**
  * 0.5.25: holds the clear while the last reply to the User is younger than the gate. Runs inside the detached
  * clear work, so the session stays free: the sleeps are the host's own timer, not a loop on the turn.
- * Every round re-reads the transcript, so a new reply to him restarts the clock and a reply to a peer or a
- * task notification does not move it. 0.5.26: an unreadable transcript fails closed: the clear waits the full
+ * Every round re-reads the transcript, so a new reply to him restarts the clock and a reply to a peer does not
+ * move it. 0.5.30: a reply in a turn a task notification started moves it when his own last message is at most
+ * 60 min before the notification (reply-gate.ts NOTIFICATION_WINDOW_MS), and a clear that goes with no hold
+ * logs one line saying why (the last reply's time and age, or that the tail holds no reply to him). 0.5.26: an unreadable transcript fails closed: the clear waits the full
  * minimum from the time it was asked, logs why, re-reads once after the wait, and only then goes (a broken
  * read never blocks the handoff for good, but it never clears early either; 0.5.25 cleared at once, which
  * cut Pick's reply at 17:03 on 2026-11-18). After a hold, a turn that is running defers the clear to the
@@ -364,7 +366,13 @@ export async function holdForReply(
     try { now = await host.clock.now(); } catch { return { kind: 'go', held: false }; }
     const wait = gateWait(view, now, gate.minMs);
     if (wait <= 0) {
-      if (!held) return { kind: 'go', held: false };
+      if (!held) {
+        // 0.5.30: this path was silent; the log now says why no hold was made (read later, 11-19 ac9a295b).
+        await log(view.anchorAt === undefined
+          ? 'handoff: clear goes with no hold: no reply to the user in the tail'
+          : `handoff: clear goes with no hold: last reply to the user at ${clockText(view.anchorAt)} is ${Math.round((now - view.anchorAt) / 1000)} s old`);
+        return { kind: 'go', held: false };
+      }
       if (view.busy) {
         await log('handoff: clear deferred after the hold, a turn is running; the next turn end retries it');
         return { kind: 'defer', held: true, lastPromptAt };
