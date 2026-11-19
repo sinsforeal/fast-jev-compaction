@@ -80,7 +80,7 @@ function fakeProcess(files: Map<string, string>, log: string[][] = []) {
 }
 function harness(options = {}, tokens: number | undefined = 200000, hybrid = true, cwd?: string | (() => string), sid = SID) {
   const handlers: Record<string, Function> = {};
-  register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, ...options });
+  register(((name: string, ...a: any[]) => { handlers[name] = a.at(-1); }) as any, { apiKey: 'f', preserveRecentMessages: 1, orderRepeatGraceMs: 0, ...options }); // 0.5.29 grace off: these drive a repeat per turn end
   const files = new Map<string, string>(); const logs: string[] = []; const store = new Map<string, unknown>();
   const rows = [m('user', 'task', { handle: 'u' }), m('assistant', 'fact'), m('user', 'continue')];
   const $: any = { env: { get: async (k: string) => k === 'DISABLE_AUTO_COMPACT' ? (hybrid ? '1' : undefined) : 'F:/temp/x' }, settings: { read: async () => ({}) },
@@ -361,7 +361,7 @@ function machine() {
   host.process = fakeProcess(files);
   const pending: Promise<void>[] = [];
   const step = async (visible: number) => {
-    const ctx: StepContext = { host, sessionId: SID, visible, log: async t => { logs.push(t); }, detach: w => { pending.push(w()); },
+    const ctx: StepContext = { host, sessionId: SID, visible, repeatGraceMs: 0, log: async t => { logs.push(t); }, detach: w => { pending.push(w()); },
       config: { handoffAt: 250000, handoffForceAt: 300000, handoffDir: DIR, handoffSkillPath: 'docs/HANDOFF_SKILL.md' } };
     await handoffStep(ctx.host, ctx); await Promise.all(pending.splice(0));
   };

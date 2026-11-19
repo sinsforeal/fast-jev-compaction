@@ -45,7 +45,9 @@ function harness(flag: '1' | 'unset' | 'unreadable' | 'other' = '1', options = {
     // 10 min reply hold. With the hold on (the product default) the fake host has no readable transcript, the
     // 0.5.26 gate fails closed and waits the full hold, and the test ends first. The hold has its own test
     // below ('0.5.26 the registered clear waits...') that passes { replyVisibleMinMs: 600000 }.
-    { apiKey: 'fixture', preserveRecentMessages: 1, targetVisibleTokens: 0, handoffDir: 'F:/h', replyVisibleMinMs: 0, ...options });
+    // orderRepeatGraceMs 0: the older tests drive a repeat at each turn end on a clock that barely moves. The
+    // 0.5.29 grace (product default 5 min) has its own tests below, which pass { orderRepeatGraceMs: 300000 }.
+    { apiKey: 'fixture', preserveRecentMessages: 1, targetVisibleTokens: 0, handoffDir: 'F:/h', replyVisibleMinMs: 0, orderRepeatGraceMs: 0, ...options });
   install();
   const put = (path: string, text: string, at = ++now) => { files.set(path, text); mtimes.set(path, at); };
   const $: any = {
@@ -234,6 +236,50 @@ describe('registered forced handoff floor', () => {
     expect(h.logs.filter(line => line.includes('built-in summary not requested'))).toHaveLength(1);
     expect(h.core).not.toHaveBeenCalled();
     expect(h.$.command.run).not.toHaveBeenCalled();
+  });
+
+  // eve c68f35dd, plugin log 2026-11-19T00:42:03Z to 00:43:05Z: order, then turn ends at +46 s, +51 s, +55 s and
+  // +62 s while the session was writing the file. 0.5.28 repeated the order on each and gave up the clear.
+  it('0.5.29 turn ends seconds apart while the file is being written repeat nothing, and the finished file clears', async () => {
+    const h = harness('unset', { orderRepeatGraceMs: 300_000 }); await force(h);
+    await h.turn(); await h.flush();
+    const partial = `# Handoff for session ${h.sid}\nbody, still writing\n`;
+    for (const gap of [46_000, 5_000, 4_000, 7_000]) {
+      h.advance(gap); h.put(h.latest, partial, h.getNow());
+      await h.turn(); await h.flush();
+    }
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(1);
+    expect(h.logs.some(line => line.includes('handoff order repeated'))).toBe(false);
+    expect(h.logs.filter(line => line.includes('no repeat before 5 min'))).toHaveLength(1);
+    h.advance(172_000); h.put(h.latest, h.good, h.getNow());   // finished 3 min 54 s after the order
+    await h.turn(); await h.flush();
+    expect(h.$.command.run).toHaveBeenCalledTimes(1);
+    expect(h.store.get(`handoff:${h.sid}`)?.gaveUp).not.toBe(true);
+  });
+
+  it('0.5.29 a write to the file restarts the wait; five quiet minutes repeat the order once', async () => {
+    const h = harness('unset', { orderRepeatGraceMs: 300_000 }); await force(h);
+    await h.turn(); await h.flush();
+    h.advance(200_000); h.put(h.latest, `# Handoff for session ${h.sid}\npart\n`, h.getNow());
+    h.advance(200_000); await h.turn(); await h.flush();        // 400 s after the order, 200 s after the write
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(1);
+    h.advance(101_000); await h.turn(); await h.flush();        // 301 s with no write
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);
+    expect(h.logs.some(line => line.includes('handoff order repeated (1 of 3)'))).toBe(true);
+    h.advance(10_000); await h.turn(); await h.flush();         // the repeat is an order too: its own wait
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);
+  });
+
+  it('0.5.29 a file finished after the first order still counts after a repeat (0.5.28: "older than the order")', async () => {
+    const h = harness('unset', { orderRepeatGraceMs: 300_000 }); await force(h);
+    await h.turn(); await h.flush();
+    const writtenAt = h.getNow() + 100_000;
+    h.advance(301_000); await h.turn(); await h.flush();
+    expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);         // repeated at +301 s
+    h.put(h.latest, h.good, writtenAt);                          // the file dates from before that repeat
+    h.advance(1_000); await h.turn(); await h.flush();
+    expect(h.logs.some(line => line.includes('older than the order'))).toBe(false);
+    expect(h.$.command.run).toHaveBeenCalledTimes(1);
   });
 
   it.each(['missing', 'throws'] as const)('clear capability %s fails closed', async mode => {
@@ -472,7 +518,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.28/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.29/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');
