@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.29",
+  "version": "0.5.30",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "author": { "name": "sinsforeal", "url": "https://github.com/sinsforeal/fast-jev-compaction" },
@@ -112,12 +112,6 @@
       "title": "Handoff skill path",
       "description": "Path cited in handoff orders; relative paths use the same captured session cwd as handoffDir.",
       "default": "docs/HANDOFF_SKILL.md"
-    },
-    "replyVisibleMinMs": {
-      "type": "number",
-      "title": "Reply visible before the handoff clear (ms)",
-      "description": "A reply to the User's own message stays visible at least this long before the plugin's /clear; the clear waits, sleeping in the background, then goes. Replies to peer messages, task notifications and plugin prompts do not count. 0 = off. If the transcript cannot be read the clear goes at once and a WARNING line is logged once per session.",
-      "default": 600000
     },
     "idleWarmMinutes": {
       "type": "number",

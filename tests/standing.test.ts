@@ -396,34 +396,6 @@ describe('standing: the fresh start', () => {
     expect(h.seen.at(-1).context).toBeUndefined();
   });
 
-  it('0.5.26 the standing clear waits for a reply to him to be 10 min old; unreadable tail holds the full 10 min', async () => {
-    for (const readable of [true, false]) {
-      const h = harness();
-      await userTurn(h);
-      h.advance(1000);
-      h.put(h.standingPath(), standingText(SID));
-      const timer = h.live()[0]!;
-      const at = timer.armedAt + timer.ms; // the clock when the timer fires
-      const iso = (ms: number) => new Date(ms).toISOString();
-      if (readable) {
-        h.put('/home/.claude/projects/F--tree/' + SID + '.jsonl', [
-          JSON.stringify({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: 'hello' }, timestamp: iso(at - 130_000) }),
-          JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }, timestamp: iso(at - 120_000) }),
-          JSON.stringify({ type: 'system', subtype: 'turn_duration', timestamp: iso(at - 119_000) }),
-        ].join('\n') + '\n');
-      } else h.$.fs.read = async (p: string) => { if (p.endsWith('.jsonl')) throw new Error('EPERM'); return h.files.get(p)!; };
-      h.$.clock.sleep = async (ms: number) => { h.advance(ms); };
-      let clearedAt = 0;
-      const run = h.$.command.run;
-      h.$.command.run = async (c: { command: string }) => { clearedAt = Date.now(); return run(c); };
-      await h.fire(timer);
-      expect(h.sid()).toBe(NEW);
-      const since = clearedAt - at; // from the fire
-      if (readable) { expect(since).toBeGreaterThanOrEqual(8 * MIN - 1000); expect(since).toBeLessThan(8 * MIN + 32_000); }
-      else { expect(since).toBeGreaterThanOrEqual(10 * MIN); expect(since).toBeLessThan(10 * MIN + 32_000); expect(h.log()).toContain('reply gate could not read the transcript'); }
-    }
-  });
-
   it('the resume line also survives a plugin reload (store record) and waits out a dropped prompt', async () => {
     const h = harness();
     await userTurn(h);

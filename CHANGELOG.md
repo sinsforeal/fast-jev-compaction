@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.30 - 2026-11-24
+
+- Removed the reply hold (the User, 11-24 14:59: "Remove the 10 minute hand over limit."). The handoff `/clear` and the standing clear go at once again, as before 0.5.25: no wait for the last reply to the User to be 10 minutes old.
+- Gone with it: the `replyVisibleMinMs` option (plugin.json, README, hooks/README, `HookConfig`), `holdForReply` and its slice sleep (handoff.ts), the stale-file refresh that only the hold used (`refreshes`, `MAX_STALE_REFRESHES`, `GATE_*`), `buildReplyGate` (fast-jev.ts), the standing clear's gate, and `hooks/reply-gate.ts` with its transcript tail reader.
+- Tests removed with the code: `tests/reply-gate.test.ts`, the registered-clear hold case in `tests/forced-handoff.test.ts`, the standing-clear hold case in `tests/standing.test.ts`, the `reply-gate.ts` loader case in `tests/host-loader-contract.test.ts`.
+- A stored `replyVisibleMinMs` in a user's plugin options is now an unknown key and is ignored.
+
 ## 0.5.29 - 2026-11-18
 
 - Fix: a session got the HANDOFF NOW order up to 4 times within a minute while it was writing the file, and the clear was then given up (the User, 11-18 19:44: "Why does the handoff command ... cause eve to do the message 3 times"; 19:46: "Fix it"). Log, session c68f35dd: order 00:42:03Z, `handoff order repeated` at 00:42:49, 00:42:54 and 00:42:58, `handoff not written ... after 4 forced orders; pruning goes on, no clear` at 00:43:05; the file was finished minutes later. 19 repeats and 3 give-ups since 11-12.
