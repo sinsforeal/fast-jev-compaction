@@ -13,7 +13,6 @@ import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFail
 import { transcriptPath } from './color-carry.js';
 import { appendDiskLine } from './disk-log.js';
 import { consoleClear, onWindows } from './console-clear.js';
-import { readTail, type TailHost, type TailRead } from './reply-gate.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -53,7 +52,6 @@ const HOOK_DEFAULTS = {
   maxPostCompactTokens: 0,
   idleWarmMinutes: 0,
   idleWarmMax: 6,
-  replyVisibleMinMs: 600_000,
   orderRepeatGraceMs: 300_000,
 };
 
@@ -61,7 +59,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.29/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.30/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -108,8 +106,6 @@ export type HookConfig = CompactOptions & {
   idleWarmMinutes: number;
   /** Warms per idle gap before the session counts as abandoned. */
   idleWarmMax: number;
-  /** 0.5.25: a reply to the User stays visible this long (ms) before the handoff clear; 0 = off. */
-  replyVisibleMinMs: number;
   /** 0.5.29: a forced handoff order is repeated only after this long (ms) with no order and no write to the file; 0 = at the next turn end. */
   orderRepeatGraceMs: number;
 };
@@ -163,7 +159,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     maxPostCompactTokens: Math.max(0, Math.floor(optionNumber(options, 'maxPostCompactTokens', HOOK_DEFAULTS.maxPostCompactTokens))),
     idleWarmMinutes: Math.max(0, optionNumber(options, 'idleWarmMinutes', HOOK_DEFAULTS.idleWarmMinutes)),
     idleWarmMax: positive(optionNumber(options, 'idleWarmMax', HOOK_DEFAULTS.idleWarmMax), HOOK_DEFAULTS.idleWarmMax),
-    replyVisibleMinMs: Math.max(0, Math.floor(optionNumber(options, 'replyVisibleMinMs', HOOK_DEFAULTS.replyVisibleMinMs))),
     orderRepeatGraceMs: Math.max(0, Math.floor(optionNumber(options, 'orderRepeatGraceMs', HOOK_DEFAULTS.orderRepeatGraceMs))),
   };
   const apiKey = optionString(options, 'apiKey');
@@ -707,31 +702,6 @@ async function windowFor($: WindowHost, configured: HookConfig, roots: HandoffRo
   }
 }
 
-/**
- * 0.5.25/0.5.26: the reply-visible gate for the handoff clear and the standing clear (one reader, one option).
- * `read` never throws; undefined when replyVisibleMinMs is 0.
- */
-function buildReplyGate(
-  $: unknown, configured: HookConfig, roots: HandoffRoots,
-): { minMs: number; read: (sessionId: string) => Promise<TailRead> } | undefined {
-  if (!(configured.replyVisibleMinMs > 0)) return undefined;
-  // The host refuses a module that binds `$` to another name (0.5.26 first build: `const h = $` failed to load
-  // in three restarted sessions, 2026-11-18 17:20); cast it at each use.
-  type GateHost = LogHost & CwdHost & { env: { get: (key: string) => Promise<string | undefined> } };
-  return {
-    minMs: configured.replyVisibleMinMs,
-    read: async id => {
-      try {
-        const home = (await ($ as GateHost).env.get('USERPROFILE')) ?? (await ($ as GateHost).env.get('HOME'));
-        const cwd = await resolvedCwd($ as GateHost);
-        if (!home || !cwd) return { ok: false as const, error: 'no home or cwd for the transcript path' };
-        const dir = await roots.resolve(cwd, id, configured.handoffDir ?? HOOK_DEFAULTS.handoffDir, text => log($ as GateHost, text));
-        return await readTail($ as TailHost, { path: transcriptPath(home, cwd, id), dir });
-      } catch { return { ok: false as const, error: 'transcript path could not be resolved' }; }
-    },
-  };
-}
-
 /** Arms (or clears) the idle warm for a session with the per-tree config in force right now. Never throws. */
 async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roots: HandoffRoots, sid: string, state: WindowState, warm: WarmState, epoch?: number): Promise<void> {
   try {
@@ -742,7 +712,7 @@ async function armIdleWarm($: WindowHost & WarmHost, configured: HookConfig, roo
     if (win.standing && configured.handoffDir) {
       try {
         const dir = await roots.resolve(cwd, sid, configured.handoffDir, text => log($, text));
-        arm = makeStandingArm(win.standing, dir, (previous, id) => roots.seed(previous, id), buildReplyGate($, configured, roots));
+        arm = makeStandingArm(win.standing, dir, (previous, id) => roots.seed(previous, id));
         await standingPersistUser($ as unknown as { store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } }, warm.standing, sid);
       } catch { arm = undefined; }
     }
@@ -1158,8 +1128,6 @@ export const register: Register = (on: On, options: PluginOptions) => {
             const cwd = await resolvedCwd($);
             return home && cwd ? transcriptPath(home, cwd, id) : undefined;
           },
-          // 0.5.25: a reply to the User stays visible replyVisibleMinMs before the clear (0 = off).
-          replyGate: buildReplyGate($, configured, handoffRoots),
         });
       } catch { await log($, 'handoff step failed (details omitted); pruning goes on'); }
     }
