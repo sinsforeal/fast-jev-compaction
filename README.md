@@ -155,7 +155,7 @@ Handoff flow:
 5. On a later non-aborted main-loop completion, accept only a regular file newer than the latest order. Stat before and after reading; its mtime and size must stay unchanged. Check that `$.command.list()` lists `clear`, then queue the detached clear.
 6. After the detached delay, check the session id and file again. Write `resumed.json` with `{ by, file, mtime, at }`, log the pending clear, then revalidate the file and session id immediately before `$.command.run({ command: "clear" })`. The file must still be valid and have the same mtime and size as the version recorded in `resumed.json`. Any invalid/replaced file or changed session retains context. The marker is written before these final checks, so its presence alone does not prove a clear.
 7. Read `$.session.id()` after clear. If changed, copy latest.md and resumed.json into the new id's folder. Write `current_session.json`, remove pending-order markers and submit HANDOFF RESUME naming latest.md and the skill's Resume section.
-8. Missing or invalid files cause at most 3 later NOW repeats after the initial order. 0.5.29: a repeat needs `orderRepeatGraceMs` (default 5 minutes, 0 = at the next completion) with no order and no write to the handoff file, so completions that come seconds apart while the file is being written repeat nothing; and the file must be newer than the order that opened the cycle, never than a repeat, so a file finished between two repeats still counts. The completion that first forced NOW does not duplicate it. Aborted turns neither repeat nor clear. After the repeat budget, log "handoff not written" and retain context. A missing/unreadable clear capability blocks clear; a failing clear gets at most 3 attempts. Neither path requests a summary or submits RESUME without a successful clear.
+8. Missing or invalid files cause at most 3 later NOW repeats after the initial order. 0.5.29: a repeat needs `orderRepeatGraceMs` (default 5 minutes, 0 = at the next completion) with no order and no write to the handoff file, so completions that come seconds apart while the file is being written repeat nothing; and the file must be newer than the order that opened the cycle, never than a repeat, so a file finished between two repeats still counts. The completion that first forced NOW does not duplicate it. Aborted turns neither repeat nor clear. After the repeat budget, log "handoff not written" and retain context. 0.5.33: an order whose submit the host drops (or that throws) is typed into the idle console, else sent through the meta peer channel with act; it logs the route that delivered and logs DROPPED only when every route failed. A missing/unreadable clear capability blocks clear; a failing clear gets at most 3 attempts. Neither path requests a summary or submits RESUME without a successful clear.
 
 #### Per-tree handoff window
 
@@ -270,7 +270,7 @@ probabilities. Error bodies and credentials are omitted. Recovery reasons and
 chronology decisions also go to `~/.claude/fast-jev-compaction.log`.
 
 The first callback for each session per registration writes a disk-only receipt:
-`module-loaded hook=fast-jev-compaction@0.5.32/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
+`module-loaded hook=fast-jev-compaction@0.5.33/forced-handoff-floor; session=<full id>; DISABLE_AUTO_COMPACT=<classification>`.
 The classification is `1`, `unset`, `other` or `unreadable`, never a raw environment
 value or error body. A cache or manifest version alone is not a loaded receipt.
 Callback re-registration can emit another receipt for the same session.
@@ -313,7 +313,7 @@ own automatic compaction; the plugin cannot disable an independent harness path.
 The branch-qualified source above selects the maintained `main` release.
 For an existing declared source, preserve unrelated fields and set its GitHub
 `repo` to `sinsforeal/fast-jev-compaction` and `ref` to `main` before updating.
-Confirm both marketplace and cached plugin manifests say 0.5.32 before reloading,
+Confirm both marketplace and cached plugin manifests say 0.5.33 before reloading,
 then require a fresh callback `module-loaded` receipt for the intended full session id.
 Native function-hook scanning and a live handoff remain separate install checks;
 unit tests and a version string do not prove either.

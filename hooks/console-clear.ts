@@ -80,7 +80,21 @@ const nativeJoin = (dir: string, name: string): string =>
  * Types `/clear` + Enter into the console of the claude process that owns `sessionId`, only when the screen
  * says idle with an empty prompt box. Never throws; every failure comes back as `{ ok: false, error }`.
  */
-export async function consoleClear(host: ProcessHost, input: { sessionId: string; dir: string }): Promise<ConsoleClearResult> {
+export function consoleClear(host: ProcessHost, input: { sessionId: string; dir: string }): Promise<ConsoleClearResult> {
+  return consoleType(host, { ...input, text: CLEAR_TEXT });
+}
+
+/** 0.5.33: text longer than this is typed first and Enter a moment later (a long burst with the Enter inside may read as a paste). */
+export const SPLIT_ENTER_OVER = 24;
+
+/**
+ * 0.5.33: the same guarded typing for any one line (the handoff order of a session whose submit was dropped).
+ * Whitespace runs are folded to one space so the line stays one row. Same checks as consoleClear: Windows only,
+ * idle, empty prompt box, never typed into a busy session. Never throws.
+ */
+export async function consoleType(host: ProcessHost, input: { sessionId: string; dir: string; text: string }): Promise<ConsoleClearResult> {
+  const text = String(input.text ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return { ok: false, error: 'console type: empty text' };
   try {
     // 0.5.31: the caller no longer decides; the wiring is always there and a non-Windows host gets a plain refusal.
     if (!(await detectWindows(host, [input.dir]))) return { ok: false, error: NOT_WINDOWS };
@@ -95,12 +109,12 @@ export async function consoleClear(host: ProcessHost, input: { sessionId: string
     const verdict = screenVerdict(seen.rows.map(String));
     if (!verdict.ok) return { ok: false, error: `console not ready (pid ${pid}): ${verdict.reason}` };
     const sent = parseHelper((await host.process.run([...argv, 'type'], {
-      timeoutMs: 30_000, env: { FJ_SID: input.sessionId, FJ_PID: String(pid), FJ_TEXT: CLEAR_TEXT },
+      timeoutMs: 30_000, env: { FJ_SID: input.sessionId, FJ_PID: String(pid), FJ_TEXT: text, ...(text.length > SPLIT_ENTER_OVER ? { FJ_SPLIT: '1' } : {}) },
     })).stdout);
     if (!sent) return { ok: false, error: `console helper (type) returned nothing (pid ${pid})` };
     if (typeof sent.error === 'string') return { ok: false, error: `console type (pid ${pid}): ${sent.error.slice(0, 160)}` };
     if (typeof sent.refused === 'string') return { ok: false, error: `console not ready (pid ${pid}): ${sent.refused.slice(0, 160)}` };
-    const want = 2 * (CLEAR_TEXT.length + 1);
+    const want = 2 * (text.length + 1);
     if (Number(sent.typed) !== want) return { ok: false, error: `console typed ${String(sent.typed)} of ${want} key records (pid ${pid})` };
     return { ok: true, pid };
   } catch (error) {
@@ -109,7 +123,8 @@ export async function consoleClear(host: ProcessHost, input: { sessionId: string
 }
 
 /**
- * The helper script. ASCII only (the file is written through `$.fs.write`). Env in: FJ_SID, FJ_PID (type), FJ_TEXT (type).
+ * The helper script. ASCII only (the file is written through `$.fs.write`). Env in: FJ_SID, FJ_PID (type), FJ_TEXT (type),
+ * FJ_SPLIT (type; 0.5.33: `1` = the text first, Enter 400 ms later; the long order line).
  * Arg 1: read | type. Out: one JSON line. Rows are escaped to \uXXXX so the code page never matters.
  */
 export const CONSOLE_HELPER_PS1 = String.raw`param([string]$Mode)
@@ -156,7 +171,18 @@ public static class FjCon {
     if (rows[at].TrimStart().Substring(1).Trim().Length > 0) return "prompt box is not empty";
     return null;
   }
-  public static string Run(uint pid, string mode, string text) {
+  static REC[] Keys(string all) {
+    REC[] recs = new REC[all.Length * 2];
+    for (int i = 0; i < all.Length; i++) {
+      for (int d = 0; d < 2; d++) {
+        REC r = new REC(); r.EventType = 1; r.KeyDown = d == 0 ? 1 : 0; r.Repeat = 1;
+        r.Vk = (ushort)(all[i] == '\r' ? 0x0D : 0); r.Scan = (ushort)(all[i] == '\r' ? 0x1C : 0); r.Ch = all[i];
+        recs[i * 2 + d] = r;
+      }
+    }
+    return recs;
+  }
+  public static string Run(uint pid, string mode, string text, bool split) {
     FreeConsole();
     if (!AttachConsole(pid)) return Err("AttachConsole(" + pid + ") failed");
     try {
@@ -186,17 +212,18 @@ public static class FjCon {
       IntPtr hin = CreateFileW("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
       if (hin == bad) return Err("CONIN$ open failed");
       try {
-        string all = text + "\r";
-        REC[] recs = new REC[all.Length * 2];
-        for (int i = 0; i < all.Length; i++) {
-          for (int d = 0; d < 2; d++) {
-            REC r = new REC(); r.EventType = 1; r.KeyDown = d == 0 ? 1 : 0; r.Repeat = 1;
-            r.Vk = (ushort)(all[i] == '\r' ? 0x0D : 0); r.Scan = (ushort)(all[i] == '\r' ? 0x1C : 0); r.Ch = all[i];
-            recs[i * 2 + d] = r;
-          }
-        }
         uint written;
-        if (!WriteConsoleInputW(hin, recs, (uint)recs.Length, out written)) return Err("WriteConsoleInputW failed");
+        if (split) {
+          uint first;
+          if (!WriteConsoleInputW(hin, Keys(text), (uint)(text.Length * 2), out first)) return Err("WriteConsoleInputW failed");
+          System.Threading.Thread.Sleep(400);
+          uint second;
+          if (!WriteConsoleInputW(hin, Keys("\r"), 2, out second)) return Err("WriteConsoleInputW (enter) failed");
+          written = first + second;
+        } else {
+          REC[] recs = Keys(text + "\r");
+          if (!WriteConsoleInputW(hin, recs, (uint)recs.Length, out written)) return Err("WriteConsoleInputW failed");
+        }
         return "\"typed\":" + written;
       } finally { CloseHandle(hin); }
     } finally { FreeConsole(); }
@@ -218,7 +245,7 @@ public static class FjCon {
   } else {
     $target = [uint32][int]$env:FJ_PID
   }
-  $out = [FjCon]::Run($target, $Mode, [string]$env:FJ_TEXT)
+  $out = [FjCon]::Run($target, $Mode, [string]$env:FJ_TEXT, ([string]$env:FJ_SPLIT -eq '1'))
   Write-Output ('{"pid":' + $target + ',' + $out + '}')
 } catch { Out-Err $_.Exception.Message }
 `;

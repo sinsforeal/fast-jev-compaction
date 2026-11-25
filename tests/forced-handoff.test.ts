@@ -4,7 +4,7 @@ import { setLogSettleMs } from '../hooks/disk-log.ts';
 import { applyDecisions, decideCall, messageChars } from '../src/compact.js';
 import { collectToolCalls } from '../src/state.js';
 import { collectPins, pinStoreKey, readPinProvenance, readPinRecord } from '../hooks/pin-provenance.js';
-import { CLEAR_RETRY_COOLDOWN_MS, MAX_CLEAR_FAILURES,MAX_FORCED_REPEATS } from '../hooks/handoff.ts';
+import { CLEAR_RETRY_COOLDOWN_MS, MAX_CLEAR_FAILURES,MAX_FORCED_REPEATS, pendingOrders } from '../hooks/handoff.ts';
 import { platformSource } from '../hooks/platform.ts';
 import type { Message } from '../src/types.js';
 
@@ -501,7 +501,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.32/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.33/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');
@@ -616,5 +616,138 @@ describe('disk log with concurrent writers', () => {
     expect(text).toContain('old last line\n');
     expect(text.match(/module-loaded/g)).toHaveLength(1);
     expect(text.endsWith('\n')).toBe(true);
+  });
+});
+
+describe('0.5.33 a dropped order submit falls through to delivery', () => {
+  const STOPPED = 'the session was stopped and nobody has sent input since';
+  const idle = ['x', '\u2500'.repeat(40), '\u276f', '\u2500'.repeat(40), '  status'];
+  const busy = ['x', 'working... esc to interrupt', '\u2500'.repeat(40), '\u276f', '\u2500'.repeat(40)];
+  type Opts = { submit?: 'ok' | 'drop' | 'throw'; console?: 'ok' | 'busy' | 'nothing'; peer?: 'ok' | 'fail' | 'nothing' };
+  /** The harness with a scripted submit, console helper (powershell) and peer helper (python); the move/del commands still work. */
+  function scripted(opts: Opts) {
+    const h = harness('unset');
+    const base = h.$.process.run.getMockImplementation()!;
+    const calls: { argv: string[]; env: Record<string, string> | undefined }[] = [];
+    h.$.process.run.mockImplementation(async (argv: string[], init: any) => {
+      if (argv[0] === 'powershell') {
+        calls.push({ argv, env: init?.env });
+        if (opts.console === 'nothing') return { exitCode: 1 };
+        if (argv.at(-1) === 'read') return { exitCode: 0, stdout: JSON.stringify({ pid: 4242, rows: opts.console === 'busy' ? busy : idle }) };
+        return { exitCode: 0, stdout: JSON.stringify({ pid: 4242, typed: 2 * (init.env.FJ_TEXT.length + 1) }) };
+      }
+      if (argv[0] === 'python') {
+        calls.push({ argv, env: init?.env });
+        if (opts.peer === 'nothing') return { exitCode: 1 };
+        return { exitCode: opts.peer === 'ok' ? 0 : 2, stdout: JSON.stringify(opts.peer === 'ok'
+          ? { ok: true, detail: 'peer to trading: queued; session started' } : { ok: false, error: 'wake: no channel' }) };
+      }
+      return base(argv, init);
+    });
+    if (opts.submit === 'drop') h.$.prompt.submit.mockResolvedValue({ drop: STOPPED });
+    if (opts.submit === 'throw') h.$.prompt.submit.mockRejectedValue(new Error('host refused the submit'));
+    const typed = () => calls.filter(c => c.argv[0] === 'powershell' && c.argv.at(-1) === 'type');
+    const peer = () => calls.filter(c => c.argv[0] === 'python');
+    return { h, calls, typed, peer };
+  }
+
+  it('a submit that enters runs no other route', async () => {
+    const s = scripted({ submit: 'ok' });
+    await force(s.h);
+    expect(s.calls).toHaveLength(0);
+    expect(s.h.logs.some(l => l.includes('handoff order submit returned after'))).toBe(true);
+    expect(s.h.logs.some(l => l.includes('DROPPED') || l.includes('DELIVERED'))).toBe(false);
+  });
+
+  it('dropped, then the console takes the order: typed once, the peer is never asked', async () => {
+    const s = scripted({ submit: 'drop', console: 'ok', peer: 'ok' });
+    await force(s.h);
+    const order = s.h.$.prompt.submit.mock.calls[0][0].text as string;
+    expect(s.typed()).toHaveLength(1);
+    expect(s.typed()[0]!.env!.FJ_TEXT).toBe(order);
+    expect(s.typed()[0]!.env!.FJ_SPLIT).toBe('1');
+    expect(s.peer()).toHaveLength(0);
+    const line = s.h.logs.find(l => l.includes('handoff order DELIVERED'))!;
+    expect(line).toContain('by the console route');
+    expect(line).toContain('submit dropped');
+    expect(line).toContain(STOPPED);
+    expect(s.h.logs.some(l => l.includes('DROPPED'))).toBe(false);
+  });
+
+  it('a thrown submit falls through the same way', async () => {
+    const s = scripted({ submit: 'throw', console: 'ok' });
+    await force(s.h);
+    expect(s.typed()).toHaveLength(1);
+    expect(s.h.logs.find(l => l.includes('handoff order DELIVERED'))).toContain('host refused the submit');
+  });
+
+  it('dropped, console refused (busy), then the peer send delivers', async () => {
+    const s = scripted({ submit: 'drop', console: 'busy', peer: 'ok' });
+    await force(s.h);
+    const order = s.h.$.prompt.submit.mock.calls[0][0].text as string;
+    expect(s.typed()).toHaveLength(0);
+    expect(s.peer()).toHaveLength(1);
+    expect(s.peer()[0]!.env).toMatchObject({ FJ_TEXT: order, FJ_ROOT: 'F:/REPS2/Meta_Orchestrator' });
+    expect(s.peer()[0]!.env!.FJ_CWD).toBeTruthy();
+    expect(s.h.files.get('F:/h/peer-send.py')).toContain('send.send(');
+    const line = s.h.logs.find(l => l.includes('handoff order DELIVERED'))!;
+    expect(line).toContain('by the peer route');
+    expect(line).toContain('console route: console not ready (pid 4242): session is busy');
+    expect(line).toContain('peer to trading: queued; session started');
+    expect(s.h.logs.some(l => l.includes('DROPPED'))).toBe(false);
+  });
+
+  it('every route failing logs DROPPED with each reason', async () => {
+    const s = scripted({ submit: 'drop', console: 'busy', peer: 'fail' });
+    await force(s.h);
+    const line = s.h.logs.find(l => l.includes('handoff order submit DROPPED'))!;
+    expect(line).toContain('submit dropped');
+    expect(line).toContain('console route: console not ready (pid 4242): session is busy');
+    expect(line).toContain('peer route: wake: no channel');
+    expect(s.h.logs.some(l => l.includes('DELIVERED'))).toBe(false);
+  });
+
+  it('helpers that return nothing are reasons too, not silence', async () => {
+    const s = scripted({ submit: 'drop', console: 'nothing', peer: 'nothing' });
+    await force(s.h);
+    const line = s.h.logs.find(l => l.includes('handoff order submit DROPPED'))!;
+    expect(line).toContain('console route: console helper (read) returned nothing');
+    expect(line).toContain('peer route: peer helper returned nothing (exit 1)');
+  });
+
+  it('the order marker guards the fallback: a cleared order is not delivered by the next route', async () => {
+    const s = scripted({ submit: 'drop', console: 'busy', peer: 'ok' });
+    const run = s.h.$.process.run.getMockImplementation()!;
+    s.h.$.process.run.mockImplementation(async (argv: string[], init: any) => {
+      const out = await run(argv, init);
+      if (argv[0] === 'powershell') pendingOrders.delete(s.h.sid); // the cycle ended while the console route ran
+      return out;
+    });
+    await force(s.h);
+    expect(s.peer()).toHaveLength(0);
+    expect(s.h.logs.find(l => l.includes('fallback stopped before the peer route'))).toContain('no longer pending');
+  });
+
+  it('no double delivery: the delivered order is not carried again, a later prompt carries nothing', async () => {
+    const s = scripted({ submit: 'drop', console: 'ok' });
+    await force(s.h);
+    const order = s.h.$.prompt.submit.mock.calls[0][0].text as string;
+    const seen: any[] = [];
+    const next = async (e: any) => { seen.push(e); return { text: e.text, context: e.context }; };
+    // the typed line arrives as a prompt: it is the order, so it carries no copy of it
+    await s.h.handlers['prompt.submit'](s.h.$, { text: order, wait: false, origin: { kind: 'composer' } }, next);
+    await s.h.handlers['prompt.submit'](s.h.$, { text: 'hello', wait: false, origin: { kind: 'composer' } }, next);
+    expect(seen.every(e => !(e.context ?? []).some((c: string) => c.includes(order)))).toBe(true);
+    expect(s.h.logs.some(l => l.includes('handoff order carried as context'))).toBe(false);
+  });
+
+  it('still carried as context when every route failed and the next prompt is someone else\'s', async () => {
+    const s = scripted({ submit: 'drop', console: 'busy', peer: 'fail' });
+    await force(s.h);
+    const order = s.h.$.prompt.submit.mock.calls[0][0].text as string;
+    const seen: any[] = [];
+    await s.h.handlers['prompt.submit'](s.h.$, { text: 'hello', wait: false, origin: { kind: 'composer' } },
+      async (e: any) => { seen.push(e); return { text: e.text }; });
+    expect(seen[0].context.join('\n')).toContain(order);
   });
 });

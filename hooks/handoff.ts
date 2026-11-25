@@ -100,6 +100,12 @@ const graceLogged = new Set<string>();
  * as `context` to the next prompt that enters, whatever its origin. Cleared with the order marker.
  */
 export const pendingOrders = new Map<string, string>();
+/**
+ * 0.5.33: the order text that has reached the session by some route: carried as context on a prompt (fast-jev.ts),
+ * or delivered by the console or peer route after a dropped submit. The fallback never delivers an order twice,
+ * and a prompt never carries one a route already delivered. Reset when a new order is queued.
+ */
+export const deliveredOrders = new Map<string, string>();
 
 export const stateKey = (sessionId: string): string => `handoff:${sessionId}`;
 
@@ -196,6 +202,7 @@ export async function writeOrderMarker(
 /** Removes order.json of one session folder. If the delete cannot run, the file is rewritten as {"order":"none"}. */
 export async function clearOrderMarker(host: HandoffHost, dir: string, sessionId: string, log?: (text: string) => Promise<void>): Promise<void> {
   pendingOrders.delete(sessionId);
+  deliveredOrders.delete(sessionId);
   const path = sessionFile(dir, sessionId, 'order.json');
   try {
     if (!(await host.fs.exists(path))) return;
@@ -289,6 +296,10 @@ export type StepContext = {
    * clear with the "session was stopped" family. Absent (other platforms, tests) = today's retry behaviour.
    */
   consoleClear?: (input: { sessionId: string; dir: string }) => Promise<ConsoleClearResult>;
+  /** 0.5.33: types one line (the order) into the idle console after a dropped submit; same checks as consoleClear. */
+  consoleType?: (input: { sessionId: string; dir: string; text: string }) => Promise<ConsoleClearResult>;
+  /** 0.5.33: sends the order through the meta peer channel (starts the turn) when the console route could not. `cwd` = the tree root. */
+  peerSend?: (input: { dir: string; cwd: string; text: string }) => Promise<{ ok: true; detail: string } | { ok: false; error: string }>;
 };
 
 /** 0.5.17: after typing `/clear`, how long the session id gets to change, and how often it is read. */
@@ -421,10 +432,54 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
   }
   // Repeated compact requests neither reset the repeat budget nor clear a session.
   if (pendingClears.has(sessionId) || (ctx.requestOnly && state.forcedOrders > 0)) return;
+  /**
+   * 0.5.33: a dropped (or failed) submit falls through to delivery, never to waiting for a person: first the
+   * console route (types the line into the idle console), then the meta peer channel (wakes the session). The
+   * order marker guards it: a route runs only while this order is still the pending one and no prompt has carried
+   * it (`deliveredOrders`); the first route that delivers ends it. DROPPED is logged only when every route failed.
+   */
+  const deliverByFallback = async (text: string, first: string): Promise<void> => {
+    const failures = [first];
+    const stopReason = async (): Promise<string | undefined> => {
+      if (pendingOrders.get(sessionId) !== text) return 'the order is no longer pending (cleared or replaced)';
+      if (deliveredOrders.get(sessionId) === text) return 'a prompt already carried the order';
+      try { if (await host.session.id() !== sessionId) return 'the session id changed'; } catch { return 'the session id is unreadable'; }
+      return undefined;
+    };
+    const routes: [string, () => Promise<{ ok: true; detail: string } | { ok: false; error: string }>][] = [
+      ['console', async () => {
+        if (!ctx.consoleType) return { ok: false, error: 'not wired' };
+        const typed = await ctx.consoleType({ sessionId, dir, text });
+        return typed.ok ? { ok: true, detail: `typed into the console, pid ${typed.pid}` } : typed;
+      }],
+      ['peer', async () => {
+        if (!ctx.peerSend) return { ok: false, error: 'not wired' };
+        return ctx.peerSend({ dir, cwd: ctx.treeRoot ?? dir, text });
+      }],
+    ];
+    for (const [name, run] of routes) {
+      const stop = await stopReason();
+      if (stop) { await log(`handoff order fallback stopped before the ${name} route: ${stop}`); return; }
+      try {
+        const res = await run();
+        if (res.ok) {
+          deliveredOrders.set(sessionId, text);
+          await log(`handoff order DELIVERED by the ${name} route after the submit was not accepted (${res.detail}); tried: ${failures.join('; ')}`);
+          return;
+        }
+        failures.push(`${name} route: ${res.error}`);
+      } catch (error) {
+        failures.push(`${name} route threw: ${String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 160)}`);
+      }
+    }
+    await log(`handoff order submit DROPPED, every route failed (${failures.join('; ')}); the next prompt that enters carries the order`);
+  };
   const queueOrder = (text: string): void => {
     pendingOrders.set(sessionId, text);
+    deliveredOrders.delete(sessionId);
     detach(async () => {
       await pause(host);
+      let failed: string | undefined;
       try {
         const current = await host.session.id();
         if (current !== sessionId) {
@@ -435,11 +490,16 @@ export async function handoffStep(host: HandoffHost, ctx: Omit<StepContext, 'hos
         const result = await host.prompt.submit({ text }) as { drop?: unknown } | undefined;
         const took = Date.now() - startedAt;
         if (result && typeof result === 'object' && result.drop !== undefined) {
-          await log(`handoff order submit DROPPED after ${took} ms (${String(result.drop).slice(0, 200)}); the next prompt that enters carries the order`);
+          failed = `submit dropped after ${took} ms (${String(result.drop).replace(/\s+/g, ' ').slice(0, 200)})`;
         } else {
           await log(`handoff order submit returned after ${took} ms (entered or queued)`);
         }
-      } catch { await log('handoff order submit failed; context retained, retry budget unchanged; the next prompt that enters carries the order'); }
+      } catch (error) {
+        failed = `submit failed (${String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 160)})`;
+      }
+      if (failed === undefined) return;
+      try { await deliverByFallback(text, failed); }
+      catch { await log('handoff order fallback failed (details omitted); the next prompt that enters carries the order'); }
     });
   };
 

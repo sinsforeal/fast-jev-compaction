@@ -9,10 +9,11 @@ import type {
 } from 'claude-code';
 
 import { applyDecisions, compact, decideCall, fitTarget, messageChars, reductionRatio, resolveOptions, type TargetFit } from '../src/compact.js';
-import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
+import { deliveredOrders, findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { appendDiskLine } from './disk-log.js';
-import { consoleClear } from './console-clear.js';
+import { consoleClear, consoleType } from './console-clear.js';
+import { peerSend } from './deliver-order.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -59,7 +60,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.32/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.33/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -768,6 +769,10 @@ async function ratioMiss(
           handoffSkillPath: await handoffRoots.resolve(cwd, sid, configured.handoffSkillPath, text => log($, text)) },
         log: text => log($, text),
         detach: work => { void work().catch(() => { /* The context remains intact on a host failure. */ }); },
+        // 0.5.33: the first forced order is queued here; its dropped submit needs the same routes as the turn-end path.
+        consoleType: input => consoleType($, input),
+        peerSend: input => peerSend($, input),
+        treeRoot: handoffRoots.rootOf(sid),
       });
       forced = true;
     } catch { /* A failed store/capability cannot authorize a summary or clear. */ }
@@ -792,7 +797,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const fallbackCounts = new Map<string, number>();
   const handoffRoots = createHandoffRoots();
   const loadedSessions = new Set<string>();
-  const carriedOrders = new Map<string, string>();
+  const carriedOrders = deliveredOrders; // 0.5.33: shared with the handoff fallback (one delivery per order)
   // 0.5.11 idle cache warm. 0.5.12: interval and cap come from the per-tree config at each arm, so the
   // state is always live and armIdleWarm decides on or off. Logs go to the disk log only.
   const idleWarm = createWarmState();
@@ -840,7 +845,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // 0.5.14: an order whose own $.prompt.submit never reached the model rides on the next prompt that enters.
     const pending = sid ? pendingOrders.get(sid) : undefined;
     if (pending && sid && (event.origin as { kind?: string } | undefined)?.kind !== 'plugin' && carriedOrders.get(sid) !== pending) {
-      const seen = snapshot.some(row => row.role === 'user' && row.text.includes(pending));
+      // 0.5.33: a prompt that IS the order (typed by the console route, or the peer channel's message) carries it already.
+      const seen = event.text.includes(pending) || snapshot.some(row => row.role === 'user' && row.text.includes(pending));
       carriedOrders.set(sid, pending);
       if (!seen) {
         event = { ...event, context: [...(event.context ?? []), `The fast-jev-compaction plugin sent a message:\n${pending}`] };
@@ -1124,6 +1130,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
           // wired; consoleClear itself refuses on a non-Windows host (the host never showed process.platform, so
           // the old `onWindows() ? ... : undefined` left it undefined on the Windows PC).
           consoleClear: input => consoleClear($, input),
+          // 0.5.33: routes for an order whose submit the host dropped (a stopped session): the console, then the peer channel.
+          consoleType: input => consoleType($, input),
+          peerSend: input => peerSend($, input),
           treeRoot: handoffRoots.rootOf(sid),
           transcriptPathFor: async id => {
             const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
