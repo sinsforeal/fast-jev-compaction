@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.32 - 2026-11-24
+
+- Fix: 0.5.31 did not load. A session restarted on it at 19:21 ran with no plugin: `hooks module fast-jev-compaction@fast-jev-compaction failed to load ... 0.5.31\hooks\platform.ts, compiled line 14 if (host?.env && await host.env.get("OS") === "Windows_...`. Same class as 0.5.26 to 0.5.28: the hooks loader follows `$` into the functions it is passed to and refuses any value use of it or its members (an optional chain, an existence test, a bind).
+- `detectWindows` (hooks/platform.ts) no longer tests `host?.env`; it calls `host.env.get(...)` inside a try, so a host with no env throws into the catch and the next signal runs. Every other 0.5.31 line in hooks/ was read for the same form (`host?.x`, `if (host.x)`, `host.x &&`, `typeof host.x`, a member passed or bound): the only other member uses are `host.fs.stat` and `host.fs.read` in color-carry.ts, both called inside try. None found.
+- Test: `tests/host-loader-contract.test.ts` gains an AST check over every hooks file: any optional chain on a member of `$` or `host`, and any member of them that is not the callee of a call (existence test, `typeof`, bind, pass), fails. Run against the 0.5.31 platform.ts it fails with `40:9: optional chain on a host member: host?.env`; on this code it passes. Plus two sample cases (the 0.5.31 form must fail, a call inside try with `!` or a cast must pass).
+
 ## 0.5.31 - 2026-11-24
 
 - Fix: the Windows check works in the plugin host (tk-2a7dt9, found 11-18). Each hook file had its own `onWindows()` reading `globalThis.process?.platform`; in the host that is not visible, so it was false in every session on the Windows PC. Effects since 0.5.17: handoff.ts ran `rm -f` and `mv -f` (`could not delete ... order.json; rewrote it as order none`), color-carry ran `grep` (`could not read the session color`), and the 0.5.17 console clear fallback was left undefined (`onWindows() ? ... : undefined`), so a clear refused after a stop was never typed into the console.

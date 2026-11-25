@@ -160,3 +160,78 @@ describe('host loader contract', () => {
     expect(violations.map(line => line.split(': ').at(-1))).toEqual(['loadedReceipt', 'ratioMiss', 'shadowed']);
   });
 });
+
+// 0.5.32: 0.5.31 failed to load. Its hooks/platform.ts had `if (host?.env && await host.env.get('OS') === ...)`.
+// The loader follows `$` into the functions it is passed to and refuses any value use of it or its members:
+// an optional chain (`host?.env`), an existence test (`host.env &&`, `if (host.env)`, `typeof host.env`) or a
+// member bound or passed without a call. Members are only ever called, inside try. Names that carry the host:
+// `$` and `host`. This is a bounded check like the ones above, not the native scanner.
+const HOST_NAMES = new Set(['$', 'host']);
+
+function rootIsHost(expression: ts.Expression): boolean {
+  let node = unwrap(expression);
+  while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) node = unwrap(node.expression);
+  return ts.isIdentifier(node) && HOST_NAMES.has(node.text);
+}
+
+function hostMemberValueUses(text: string): string[] {
+  const source = ts.createSourceFile('host-member-input.ts', text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const note = (node: ts.Node, why: string) => {
+    const at = source.getLineAndCharacterOfPosition(node.getStart(source));
+    found.push(`${at.line + 1}:${at.character + 1}: ${why}: ${node.getText(source).slice(0, 70)}`);
+  };
+  const inType = (node: ts.Node): boolean => !!ts.findAncestor(node, n => ts.isTypeNode(n) || ts.isInterfaceDeclaration(n) || ts.isTypeAliasDeclaration(n));
+  const visit = (node: ts.Node) => {
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && !inType(node) && rootIsHost(node)) {
+      if (node.questionDotToken) note(node, 'optional chain on a host member');
+      // A chain's outermost access is a value use unless it is the callee of a call.
+      let outer: ts.Node = node;
+      while (outer.parent && (ts.isParenthesizedExpression(outer.parent) || ts.isAsExpression(outer.parent)
+        || ts.isNonNullExpression(outer.parent) || ts.isTypeAssertionExpression(outer.parent) || ts.isSatisfiesExpression(outer.parent))) outer = outer.parent;
+      const parent = outer.parent;
+      const partOfChain = !!parent && (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer;
+      const called = !!parent && ts.isCallExpression(parent) && parent.expression === outer;
+      if (!partOfChain && !called) note(node, 'host member used as a value');
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+describe('host loader contract: members are only called (0.5.32)', () => {
+  it('no hooks file tests, chains, binds or passes a host member as a value', () => {
+    for (const name of sources) {
+      expect(hostMemberValueUses(readFileSync(join(HOOKS_DIR, name), 'utf8')), name).toEqual([]);
+    }
+  });
+
+  it('fails on the 0.5.31 detectWindows form (host?.env && await host.env.get)', () => {
+    const bad = hostMemberValueUses(`
+      async function detectWindows(host) {
+        try { if (host?.env && (await host.env.get('OS')) === 'Windows_NT') return true; } catch {}
+        try { if (host.env && isWindowsPath(await host.env.get('SystemRoot'))) return true; } catch {}
+        if (typeof host.env !== 'undefined') return true;
+        const get = host.env.get;
+        use(host.fs.stat);
+        return false;
+      }
+    `);
+    expect(bad.length).toBeGreaterThanOrEqual(5);
+    expect(bad.some(line => line.includes('optional chain'))).toBe(true);
+  });
+
+  it('accepts a call on a host member inside try, with a non-null assertion or a cast', () => {
+    expect(hostMemberValueUses(`
+      async function detectWindows(host) {
+        try { if ((await host.env!.get('OS')) === 'Windows_NT') return true; } catch {}
+        try { size = (await host.fs!.stat!(path)).size; } catch {}
+        await ($.session.messages as unknown as Rt)(1);
+        log($, 'x');
+        type T = Host['env'];
+        return false;
+      }
+    `)).toEqual([]);
+  });
+});
