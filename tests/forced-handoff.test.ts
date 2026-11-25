@@ -5,6 +5,7 @@ import { applyDecisions, decideCall, messageChars } from '../src/compact.js';
 import { collectToolCalls } from '../src/state.js';
 import { collectPins, pinStoreKey, readPinProvenance, readPinRecord } from '../hooks/pin-provenance.js';
 import { CLEAR_RETRY_COOLDOWN_MS, MAX_CLEAR_FAILURES,MAX_FORCED_REPEATS } from '../hooks/handoff.ts';
+import { platformSource } from '../hooks/platform.ts';
 import type { Message } from '../src/types.js';
 
 const m = (role: Message['role'], text: string, extra = {}): Message => ({ role, text, toolUses: [], ...extra });
@@ -395,6 +396,25 @@ describe('registered forced handoff floor', () => {
     expect(h.$.prompt.submit).toHaveBeenCalledTimes(2);
   });
 
+  it('0.5.31 the console fallback is wired when the host shows no process.platform (the plugin host on Windows)', async () => {
+    const real = platformSource.processPlatform;
+    platformSource.processPlatform = () => undefined;
+    try {
+      const h = harness('unset'); await force(h); h.put(h.latest, h.good);
+      h.$.command.run.mockRejectedValue(new Error('fast-jev-compaction: $.command.run: the session was stopped and nobody has sent input since'));
+      const idle = ['x', '─'.repeat(40), '❯', '─'.repeat(40), '  status'];
+      h.$.process.run.mockImplementation(async (argv: string[]) => {
+        if (argv[0] !== 'powershell') return { exitCode: 1 };
+        if (argv.at(-1) === 'read') return { exitCode: 0, stdout: JSON.stringify({ pid: 31337, rows: idle }) };
+        h.setSid('typed-clear-session');
+        return { exitCode: 0, stdout: JSON.stringify({ pid: 31337, typed: 14 }) };
+      });
+      await h.turn();
+      for (let i = 0; i < 4; i++) await h.flush();
+      expect(h.logs.slice(-5).join(' | ')).toContain('handoff clear via console fallback (pid 31337)');
+    } finally { platformSource.processPlatform = real; }
+  });
+
   it('0.5.16 retries after the cooldown once the burst is spent, and then clears', async () => {
     const h = harness('unset'); await force(h); h.put(h.latest, h.good);
     h.$.command.run.mockRejectedValue(new Error('clear refused'));
@@ -481,7 +501,7 @@ describe('module-loaded callback receipt', () => {
     await h.append('observed delivery', 'receipt-append');
     const disk = h.files.get('F:/temp/jev-floor/.claude/fast-jev-compaction.log')!;
     expect(disk.match(/module-loaded/g)).toHaveLength(1);
-    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.30/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
+    expect(disk).toContain(`module-loaded hook=fast-jev-compaction@0.5.31/forced-handoff-floor; session=${h.sid}; DISABLE_AUTO_COMPACT=${flag}`);
     expect(h.logs.some(line => line.includes('module-loaded'))).toBe(false);
     expect(h.$.ui.toast).not.toHaveBeenCalled();
     expect(disk).not.toContain('private-other-value');

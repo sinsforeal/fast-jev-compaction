@@ -5,12 +5,17 @@
  * Nothing here throws: the handoff must never fail because of the color.
  */
 
+import { detectWindows, nativeWindowsPath, type PlatformHost } from './platform.js';
+
 export type ColorHost = {
   fs: {
     exists: (path: string) => Promise<boolean>;
     read: (path: string) => Promise<string>;
     write: (path: string, text: string) => Promise<void>;
+    /** 0.5.31: size decides whether the plugin may read the transcript itself (`$.fs.read` rejects over 4 MiB). */
+    stat?: (path: string) => Promise<{ kind: string; size: number; mtimeMs: number }>;
   };
+  env?: PlatformHost['env'];
   command: {
     run: (input: { command: string; args?: string }) => Promise<unknown>;
     list: () => Promise<readonly { name: string }[]>;
@@ -25,8 +30,6 @@ const uuid4 = (): string => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]
   const r = Math.floor(Math.random() * 16);
   return (c === 'x' ? r : (r & 3) | 8).toString(16);
 });
-
-const onWindows =(): boolean => (globalThis as { process?: { platform?: string } }).process?.platform === 'win32';
 
 /** `<home>/.claude/projects/<cwd with every non-alphanumeric run char as '-'>/<sid>.jsonl` */
 export function transcriptPath(home: string, cwd: string, sessionId: string): string {
@@ -48,14 +51,33 @@ export function newestColor(stdout: string): AgentColorRecord | undefined {
   return undefined;
 }
 
+/** `$.fs.read` rejects a file over 4 MiB; stay well under it. */
+export const JS_READ_MAX_BYTES = 3_500_000;
+
+/** The newest agent-color record in transcript text, found in JS: only lines that mention the word are parsed. */
+export function colorFromText(text: string): AgentColorRecord | undefined {
+  return newestColor(text.split(/\r?\n/).filter(line => line.includes('agent-color')).join('\n'));
+}
+
+/** The scan command per platform: `findstr` on Windows (ships with it, no grep needed), `grep -a` elsewhere. */
+export const scanArgv = (windows: boolean, path: string): string[] =>
+  (windows ? ['findstr', '/C:agent-color', nativeWindowsPath(path)] : ['grep', '-a', 'agent-color', path]);
+
 /**
- * Streams the transcript through grep/findstr in a child process, so the plugin only ever holds the
- * matching lines (a few records), never the file. Undefined when there is no record.
+ * The newest color record of one transcript. 0.5.31: no grep for a transcript the host can read itself (up to
+ * JS_READ_MAX_BYTES by `$.fs.stat`): `$.fs.read` and a filter in JS. A bigger one, or a host with no stat or a
+ * failing read, streams through a child process so the plugin only holds the matching lines (a few records),
+ * never the file: `findstr` on Windows, `grep -a` elsewhere. Undefined when there is no record.
  * Throws on a read error; the caller logs it.
  */
-export async function readSessionColor(host: Pick<ColorHost, 'process'>, path: string): Promise<AgentColorRecord | undefined> {
-  const argv = onWindows() ? ['findstr', '/C:agent-color', path.replace(/\//g, '\\')] : ['grep', '-a', 'agent-color', path];
-  const out = await host.process.run(argv, { timeoutMs: 20_000 });
+export async function readSessionColor(host: Pick<ColorHost, 'process'> & Partial<Pick<ColorHost, 'fs' | 'env'>>, path: string): Promise<AgentColorRecord | undefined> {
+  // No existence test on host.fs.stat: the hooks loader refuses a host event read as a value (0.5.28).
+  let size = -1;
+  try { size = (await host.fs!.stat!(path)).size; } catch { size = -1; }
+  if (size >= 0 && size <= JS_READ_MAX_BYTES) {
+    try { return colorFromText(await host.fs!.read(path)); } catch { /* the child process route below */ }
+  }
+  const out = await host.process.run(scanArgv(await detectWindows(host, [path]), path), { timeoutMs: 20_000 });
   if (out.exitCode === 1) return undefined; // no match
   if (out.exitCode !== 0) throw new Error(`transcript scan exited ${out.exitCode}`);
   return newestColor(out.stdout ?? '');
@@ -103,7 +125,7 @@ export type ColorResult = { record?: AgentColorRecord; from?: string; scanned: n
  * Then the cache `<dir>/color.json`. A record found in a transcript refreshes the cache.
  */
 export async function resolveColor(
-  host: Pick<ColorHost, 'fs' | 'process'>, dir: string, sessionId: string,
+  host: Pick<ColorHost, 'fs' | 'process' | 'env'>, dir: string, sessionId: string,
   pathFor: (id: string) => Promise<string | undefined>, log: (text: string) => Promise<void>, maxHops = MAX_COLOR_HOPS,
 ): Promise<AgentColorRecord | undefined> {
   const res: ColorResult = { scanned: 0, errors: 0 };

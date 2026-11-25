@@ -13,7 +13,7 @@
  */
 
 import { carryColor, resolveColor, transcriptPath, type AgentColorRecord } from './color-carry.js';
-import { consoleClear, isStoppedRefusal, onWindows } from './console-clear.js';
+import { consoleClear, isStoppedRefusal } from './console-clear.js';
 import { checkLatest, clearAvailable, handoffBlocking, sessionFile, waitForNewId, type HandoffHost } from './handoff.js';
 
 export const CACHE_TTL_MINUTES = 60;
@@ -378,7 +378,7 @@ async function standingClear(
     } catch (error) {
       const reason = String((error as { message?: unknown } | undefined)?.message ?? error).replace(/\s+/g, ' ').slice(0, 200);
       let note = '';
-      if (onWindows() && isStoppedRefusal(reason)) {
+      if (isStoppedRefusal(reason)) { // 0.5.31: consoleClear refuses by itself off Windows
         const typed = await consoleClear($, { sessionId: sid, dir: arm.dir });
         if (typed.ok) {
           if (await waitForNewId($, sid)) { cleared = true; await log(`standing: clear via console fallback (pid ${typed.pid})`); }

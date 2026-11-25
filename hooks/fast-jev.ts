@@ -12,7 +12,7 @@ import { applyDecisions, compact, decideCall, fitTarget, messageChars, reduction
 import { findTreeRoot, handoffStep, normalizeRoot, pendingOrders, resetClearFailures, resolveAgainstCwd, sessionFile, type HandoffHost } from './handoff.js';
 import { transcriptPath } from './color-carry.js';
 import { appendDiskLine } from './disk-log.js';
-import { consoleClear, onWindows } from './console-clear.js';
+import { consoleClear } from './console-clear.js';
 import { createWarmState, warmEpoch, warmIdle, warmSubmit, warmTouch, type WarmHost, type WarmState } from './idle-warm.js';
 import { makeStandingArm, parseStandingOptions, standingNoteUser, standingPersistUser, standingResumeContext, standingResumeDone, type StandingArm, type StandingOptions } from './standing.js';
 import { collectToolCalls, estimateTokens } from '../src/state.js';
@@ -59,7 +59,7 @@ const HOOK_DEFAULTS = {
 const PRUNE_HYSTERESIS_TOKENS = 32_000;
 
 // Keep the source identity in failure receipts: an old loaded module can outlive a cache update.
-const HOOK_ID = 'fast-jev-compaction@0.5.30/forced-handoff-floor';
+const HOOK_ID = 'fast-jev-compaction@0.5.31/forced-handoff-floor';
 type EnvHost = { env: { get(name: string): Promise<string | undefined> } };
 async function autoCompactFlag($: EnvHost): Promise<'1' | 'unset' | 'other' | 'unreadable'> {
   try {
@@ -1120,8 +1120,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
           log: text => log($, text),
           detach: work => { void work().catch(() => { /* the work logs its own failures */ }); },
           onIdChanged: (previous, id) => handoffRoots.seed(previous, id),
-          // 0.5.17: Windows only; a clear the host refuses after a stop is typed into the session's own console.
-          consoleClear: onWindows() ? input => consoleClear($, input) : undefined,
+          // 0.5.17: a clear the host refuses after a stop is typed into the session's own console. 0.5.31: always
+          // wired; consoleClear itself refuses on a non-Windows host (the host never showed process.platform, so
+          // the old `onWindows() ? ... : undefined` left it undefined on the Windows PC).
+          consoleClear: input => consoleClear($, input),
           treeRoot: handoffRoots.rootOf(sid),
           transcriptPathFor: async id => {
             const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));

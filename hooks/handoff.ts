@@ -6,6 +6,7 @@
 
 import { carryColor, resolveColor, type AgentColorRecord } from './color-carry.js';
 import { isStoppedRefusal, type ConsoleClearResult } from './console-clear.js';
+import { detectWindows, nativeWindowsPath } from './platform.js';
 
 export type HandoffConfig = {
   handoffAt: number;
@@ -37,6 +38,8 @@ export type HandoffHost = {
   };
   /** 0.5.5: `$.process.run`, used only to rename and delete the order marker (`$.fs` has neither). */
   process: { run: (argv: readonly string[], init?: { timeoutMs?: number; env?: Record<string, string> }) => Promise<{ exitCode: number; stdout?: string }> };
+  /** 0.5.31: `$.env.get`, read for the Windows check only (hooks/platform.ts). A host without it answers from paths. */
+  env?: { get: (name: string) => Promise<string | undefined> };
 };
 
 /** Per-session record under `handoff:<sessionId>` in `$.store`. */
@@ -154,8 +157,15 @@ export function sessionFile(dir: string, sessionId: string, name: string): strin
   return `${dir.replace(/[\\/]+$/, '')}${sep}${sessionId}${sep}${name}`;
 }
 
-const onWindows = (): boolean => (globalThis as { process?: { platform?: string } }).process?.platform === 'win32';
-const nativePath = (path: string): string => (onWindows() ? path.replace(/\//g, '\\') : path);
+/**
+ * 0.5.31: the argv that moves `from` over `to` and the one that deletes `path`, per platform.
+ * `$.fs` has no rename and no delete, so both go through `$.process.run`. Windows: `cmd /c move /Y` and
+ * `cmd /c del /F /Q` (cmd ships with Windows; no `mv`, no `rm`). Elsewhere `mv -f` and `rm -f`.
+ */
+export const moveArgv = (windows: boolean, from: string, to: string): string[] =>
+  (windows ? ['cmd', '/c', 'move', '/Y', nativeWindowsPath(from), nativeWindowsPath(to)] : ['mv', '-f', from, to]);
+export const deleteArgv = (windows: boolean, path: string): string[] =>
+  (windows ? ['cmd', '/c', 'del', '/F', '/Q', nativeWindowsPath(path)] : ['rm', '-f', path]);
 
 /** Runs one process step; true when it exited 0. No `$.process` or a throw counts as false. */
 async function runStep(host: HandoffHost, argv: string[]): Promise<boolean> {
@@ -177,9 +187,7 @@ export async function writeOrderMarker(
     const body = JSON.stringify({ order: marker.order, ts: new Date().toISOString(), tokens: marker.tokens ?? null, limit: marker.limit, attempt: marker.attempt, ...(marker.reason ? { reason: marker.reason } : {}), ...(marker.window ? { window: marker.window } : {}) });
     const tmp = `${path}.tmp`;
     await host.fs.write(tmp, body);
-    const moved = await runStep(host, onWindows()
-      ? ['cmd', '/c', 'move', '/Y', nativePath(tmp), nativePath(path)]
-      : ['mv', '-f', tmp, path]);
+    const moved = await runStep(host, moveArgv(await detectWindows(host, [path, dir]), tmp, path));
     if (!moved) await host.fs.write(path, body);
   } catch { /* the marker is a convenience; the order goes on */ }
   return path;
@@ -191,7 +199,7 @@ export async function clearOrderMarker(host: HandoffHost, dir: string, sessionId
   const path = sessionFile(dir, sessionId, 'order.json');
   try {
     if (!(await host.fs.exists(path))) return;
-    const gone = await runStep(host, onWindows() ? ['cmd', '/c', 'del', '/F', '/Q', nativePath(path)] : ['rm', '-f', path]);
+    const gone = await runStep(host, deleteArgv(await detectWindows(host, [path, dir]), path));
     if (!gone) {
       await host.fs.write(path, JSON.stringify({ order: 'none', ts: new Date().toISOString() }));
       await log?.(`handoff: could not delete ${path}; rewrote it as order none`);

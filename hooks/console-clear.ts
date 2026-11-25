@@ -20,8 +20,6 @@ export function isStoppedRefusal(text: unknown): boolean {
   return /session was (?:stopped|interrupted)|nobody has sent input|no(?:body| one) has (?:typed|sent) (?:any )?input/i.test(s);
 }
 
-export const onWindows = (): boolean => (globalThis as { process?: { platform?: string } }).process?.platform === 'win32';
-
 export type ScreenVerdict = { ok: true } | { ok: false; reason: string };
 
 /** Prompt marker (U+276F) and the box-drawing rule characters (U+2500, U+2501, U+2550), by code point. */
@@ -53,10 +51,16 @@ export function screenVerdict(rows: readonly string[]): ScreenVerdict {
 
 export type ConsoleClearResult = { ok: true; pid: number } | { ok: false; error: string };
 
+export const NOT_WINDOWS = 'console fallback is Windows only (PowerShell and the Win32 console)';
+
 type ProcessHost = {
+  /** 0.5.31: read for the Windows check (hooks/platform.ts); absent, the directory path decides. */
+  env?: PlatformHost['env'];
   fs: { write: (path: string, text: string) => Promise<void> };
   process: { run: (argv: readonly string[], init?: { timeoutMs?: number; env?: Record<string, string> }) => Promise<{ exitCode: number; stdout?: string; stderr?: string }> };
 };
+
+import { detectWindows, type PlatformHost } from './platform.js';
 
 export const CLEAR_TEXT = '/clear';
 
@@ -78,6 +82,8 @@ const nativeJoin = (dir: string, name: string): string =>
  */
 export async function consoleClear(host: ProcessHost, input: { sessionId: string; dir: string }): Promise<ConsoleClearResult> {
   try {
+    // 0.5.31: the caller no longer decides; the wiring is always there and a non-Windows host gets a plain refusal.
+    if (!(await detectWindows(host, [input.dir]))) return { ok: false, error: NOT_WINDOWS };
     const script = nativeJoin(input.dir, 'console-clear.ps1');
     await host.fs.write(script, CONSOLE_HELPER_PS1);
     const argv = ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script];

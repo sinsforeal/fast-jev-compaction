@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { handoffStep, stateKey, type HandoffHost } from '../hooks/handoff.ts';
-import { newestColor, transcriptPath } from '../hooks/color-carry.ts';
+import { JS_READ_MAX_BYTES, newestColor, transcriptPath } from '../hooks/color-carry.ts';
 
 const OLD = 'old-session';
 const NEW = 'new-session';
@@ -11,7 +11,7 @@ const rec = (color: string, sid = OLD) => JSON.stringify({ type: 'agent-color', 
 
 /** A host holding a complete handoff for OLD; `scan` is what grep/findstr prints for the transcript. */
 type Scan = { exitCode: number; stdout?: string } | Error;
-function setup(opts: { scan?: Scan; scanFor?: (path: string) => Scan; extra?: Record<string, string>; listed?: string[]; colorRun?: Error } = {}) {
+function setup(opts: { scan?: Scan; scanFor?: (path: string) => Scan; extra?: Record<string, string>; listed?: string[]; colorRun?: Error; readable?: boolean } = {}) {
   let sid = OLD;
   const files = new Map<string, string>([[`F:/h/${OLD}/latest.md`, `# ${OLD}\nCOMPLETE\n`], ...Object.entries(opts.extra ?? {})]);
   const logs: string[] = [];
@@ -24,7 +24,13 @@ function setup(opts: { scan?: Scan; scanFor?: (path: string) => Scan; extra?: Re
       exists: async (p: string) => files.has(p),
       read: vi.fn(async (p: string) => { if (!files.has(p)) throw new Error('missing'); return files.get(p)!; }),
       write: vi.fn(async (p: string, t: string) => { files.set(p, t); }),
-      stat: async (p: string) => ({ kind: 'file', size: files.get(p)?.length ?? 0, mtimeMs: 10 }),
+      // like the host: a missing file rejects (0.5.31 reads a small transcript itself, so this matters)
+      // A transcript reports a size over the read limit unless `readable` is set: these tests are about the
+      // child process scan, which is what a big transcript uses. The JS route has its own cases below.
+      stat: async (p: string) => {
+        if (!files.has(p)) throw new Error('ENOENT');
+        return { kind: 'file', size: p.endsWith('.jsonl') && !opts.readable ? JS_READ_MAX_BYTES + 1 : files.get(p)!.length, mtimeMs: 10 };
+      },
     },
     store: {
       get: async (k: string) => store.get(k),
@@ -71,6 +77,13 @@ describe('color carry across the handoff clear', () => {
     expect(s.calls).toEqual(['run:clear', 'run:color red', 'submit:HANDOFF RESUME']);
     expect(s.host.process.run.mock.calls[0]![0].at(-1)).toContain('old-session.jsonl');
     expect(s.files.has(NEW_JSONL)).toBe(false);
+  });
+
+  it('0.5.31 a readable transcript is scanned in JS: the color carries with no grep or findstr run at all', async () => {
+    const s = setup({ readable: true, extra: { [OLD_JSONL]: `${rec('blue')}\n{"type":"user"}\n${rec('teal')}\n` } });
+    await s.step();
+    expect(s.calls).toEqual(['run:clear', 'run:color teal', 'submit:HANDOFF RESUME']);
+    expect(s.host.process.run).not.toHaveBeenCalled();
   });
 
   it('submits nothing when the transcript holds no color record', async () => {
