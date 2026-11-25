@@ -36,11 +36,13 @@ export async function detectWindows(host: PlatformHost | undefined, hints: reado
   // Only a positive answer is trusted: a host shim of `process` that says something else is not proof.
   if (platformSource.processPlatform() === 'win32') return true;
   if (hints.some(isWindowsPath)) return true;
+  // 0.5.32: no existence test on host.env (the loader refuses `host?.env &&` as a value use, 0.5.28 rule);
+  // a host with no env (or no host) throws inside the try and the next signal runs.
   try {
-    if (host?.env && (await host.env.get('OS')) === 'Windows_NT') return true;
+    if ((await host.env!.get('OS')) === 'Windows_NT') return true;
   } catch { /* try the next signal */ }
   try {
-    if (host?.env && isWindowsPath(await host.env.get('SystemRoot'))) return true;
+    if (isWindowsPath(await host.env!.get('SystemRoot'))) return true;
   } catch { /* no env, not Windows as far as we can tell */ }
   return false;
 }
